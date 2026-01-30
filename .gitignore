@@ -25,6 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+calsci_latest_itr_python/
+micropython/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
