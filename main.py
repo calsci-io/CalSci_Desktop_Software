@@ -36,14 +36,46 @@ def log_append(widget: ScrolledText, text: str):
     widget.update_idletasks()
 
 
-# ---------- ESP32 PORT DETECTION ----------
+def debug_ports(log):
+    for p in list_ports.comports():
+        log(
+            f"{p.device} | "
+            f"name={p.name} | "
+            f"desc={p.description} | "
+            f"mfg={p.manufacturer} | "
+            f"hwid={p.hwid}"
+        )
 
+
+# ---------- ESP32 PORT DETECTION ----------
 def find_esp32_ports():
     ports = []
+
+    KEYWORDS = (
+        "esp32",
+        "espressif",
+        "cp210",     # Silicon Labs
+        "ch340",     # WCH
+        "ch341",
+        "ftdi",
+        "usb serial",
+        "uart",
+    )
+
     for p in list_ports.comports():
-        text = f"{p.manufacturer} {p.description}".lower()
-        if any(k.lower() in text for k in ESP32_KEYWORDS):
+        fields = [
+            p.device or "",
+            p.name or "",
+            p.description or "",
+            p.manufacturer or "",
+            p.hwid or "",
+        ]
+
+        text = " ".join(fields).lower()
+
+        if any(k in text for k in KEYWORDS):
             ports.append(p.device)
+
     return ports
 
 
