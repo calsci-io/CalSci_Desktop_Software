@@ -1,241 +1,12 @@
-# import sys
-# import time
-# import subprocess
-# from pathlib import Path
-
-# import git
-# from serial.tools import list_ports
-
-# from PySide6.QtWidgets import (
-#     QApplication,
-#     QMainWindow,
-#     QWidget,
-#     QVBoxLayout,
-#     QPushButton,
-#     QTextEdit,
-# )
-# from PySide6.QtCore import Qt
-
-
-# # ================= CONFIG =================
-
-# REPO_URL = "https://github.com/calsci-io/calsci_latest_itr"
-# BRANCH = "main"
-# ROOT = Path("./calsci_latest_itr_python")
-# CALIBRATION_FILES = 3
-
-# ESP32_KEYWORDS = ("Espressif",)
-
-# # =========================================
-
-
-# def log_append(widget: QTextEdit, text: str):
-#     widget.append(text)
-#     widget.verticalScrollBar().setValue(
-#         widget.verticalScrollBar().maximum()
-#     )
-#     QApplication.processEvents()
-
-
-
-# # ---------- ESP32 PORT DETECTION ----------
-
-# def find_esp32_ports():
-#     ports = []
-#     for p in list_ports.comports():
-#         text = f"{p.manufacturer} {p.description}".lower()
-#         if any(k.lower() in text for k in ESP32_KEYWORDS):
-#             ports.append(p.device)
-#     return ports
-
-
-# # ---------- GIT HELPERS ----------
-
-# def ensure_repo(log):
-#     if not ROOT.exists():
-#         log(f"Cloning repo into {ROOT} ...")
-#         git.Repo.clone_from(REPO_URL, ROOT, branch=BRANCH)
-#         log("Clone complete.")
-#     else:
-#         log("Repo already exists.")
-
-
-# def repo_status(log):
-#     repo = git.Repo(ROOT)
-#     repo.remotes.origin.fetch()
-
-#     behind = sum(1 for _ in repo.iter_commits(f"{BRANCH}..origin/{BRANCH}"))
-#     ahead = sum(1 for _ in repo.iter_commits(f"origin/{BRANCH}..{BRANCH}"))
-
-#     return ahead, behind
-
-
-# def pull_repo(log):
-#     repo = git.Repo(ROOT)
-#     repo.remotes.origin.pull()
-#     log("Repo updated successfully.")
-
-
-# # ---------- AMPY HELPERS ----------
-
-# def should_skip(path: Path) -> bool:
-#     if any(part.startswith(".") for part in path.parts):
-#         return True
-#     if path.name in {".gitignore", ".gitattributes"}:
-#         return True
-#     if path.suffix == ".pyc":
-#         return True
-#     return False
-
-
-# def ampy_mkdir(port, path: str):
-#     subprocess.run(
-#         ["ampy", "-p", port, "mkdir", path],
-#         stdout=subprocess.DEVNULL,
-#         stderr=subprocess.DEVNULL,
-#     )
-
-
-# def ensure_dirs(port, remote_path: str):
-#     parts = remote_path.split("/")[:-1]
-#     current = ""
-#     for part in parts:
-#         current = f"{current}/{part}" if current else part
-#         ampy_mkdir(port, current)
-
-
-# def upload_file(port, local_path: Path, remote_path: str):
-#     subprocess.run(
-#         ["ampy", "-p", port, "put", str(local_path), remote_path],
-#         check=True,
-#     )
-
-
-# # ---------- GUI APP ----------
-
-# class MainWindow(QMainWindow):
-#     def __init__(self):
-#         super().__init__()
-
-#         self.setWindowTitle("CalSci Tool")
-#         self.resize(600, 400)
-
-#         self.log_box = QTextEdit()
-#         self.log_box.setReadOnly(True)
-
-#         self.update_btn = QPushButton("Download Updates")
-#         self.flash_btn = QPushButton("Flash to CalSci")
-
-#         self.update_btn.clicked.connect(self.handle_update)
-#         self.flash_btn.clicked.connect(self.handle_flash)
-
-#         layout = QVBoxLayout()
-#         layout.addWidget(self.update_btn)
-#         layout.addWidget(self.flash_btn)
-#         layout.addWidget(self.log_box)
-
-#         container = QWidget()
-#         container.setLayout(layout)
-#         self.setCentralWidget(container)
-
-#     # -------- BUTTON ACTIONS --------
-
-#     def handle_update(self):
-#         def log(msg): log_append(self.log_box, msg)
-
-#         try:
-#             ensure_repo(log)
-#             ahead, behind = repo_status(log)
-
-#             if behind > 0:
-#                 log(f"Update available ({behind} commits). Pulling...")
-#                 pull_repo(log)
-#             elif ahead > 0:
-#                 log(f"Local repo ahead by {ahead} commits.")
-#             else:
-#                 log("Repo already in sync.")
-
-#         except Exception as e:
-#             log(f"❌ Error: {e}")
-
-#     def handle_flash(self):
-#         def log(msg): log_append(self.log_box, msg)
-
-#         try:
-#             ports = find_esp32_ports()
-#             if not ports:
-#                 raise RuntimeError("No ESP32 detected")
-
-#             port = ports[0]
-#             log(f"Detected ESP32 on {port}")
-
-#             files = [
-#                 p for p in ROOT.rglob("*")
-#                 if p.is_file() and not should_skip(p)
-#             ]
-
-#             total_files = len(files)
-#             total_chars = sum(p.stat().st_size for p in files)
-
-#             log(f"Uploading {total_files} files...")
-
-#             uploaded_chars = 0
-#             timings = []
-#             speed = None
-
-#             for i, path in enumerate(files, start=1):
-#                 remote_path = path.relative_to(ROOT).as_posix()
-#                 size = path.stat().st_size
-
-#                 start = time.perf_counter()
-#                 ensure_dirs(port, remote_path)
-#                 upload_file(port, path, remote_path)
-#                 elapsed = time.perf_counter() - start
-
-#                 uploaded_chars += size
-
-#                 if i <= CALIBRATION_FILES:
-#                     timings.append((size, elapsed))
-#                     if i == CALIBRATION_FILES:
-#                         speed = sum(c for c, _ in timings) / sum(t for _, t in timings)
-
-#                 remaining = total_chars - uploaded_chars
-#                 eta = (
-#                     time.strftime("%H:%M:%S", time.gmtime(remaining / speed))
-#                     if speed else "calibrating..."
-#                 )
-
-#                 percent = (uploaded_chars / total_chars) * 100
-
-#                 log(f"[{i}/{total_files}] {percent:5.1f}% | ETA {eta} → {remote_path}")
-
-#             log("🎉 Flashing complete!")
-
-#         except Exception as e:
-#             log(f"❌ Error: {e}")
-
-
-# # ---------- ENTRY POINT ----------
-
-# def main():
-#     app = QApplication(sys.argv)
-#     window = MainWindow()
-#     window.show()
-#     sys.exit(app.exec())
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 import sys
 import time
+import threading
 import subprocess
 from pathlib import Path
-import threading
 
 import git
 from serial.tools import list_ports
+import serial
 
 import tkinter as tk
 from tkinter import ttk
@@ -246,10 +17,13 @@ from tkinter.scrolledtext import ScrolledText
 
 REPO_URL = "https://github.com/calsci-io/calsci_latest_itr"
 BRANCH = "main"
-ROOT = Path("./calsci_latest_itr_python")
+ROOT = Path("./calsci_latest_itr")
 CALIBRATION_FILES = 3
 
 ESP32_KEYWORDS = ("Espressif",)
+
+BAUDRATE = 115200
+REPL_DELAY = 0.05
 
 # =========================================
 
@@ -300,7 +74,7 @@ def pull_repo(log):
     log("Repo updated successfully.")
 
 
-# ---------- AMPY HELPERS ----------
+# ---------- FILE FILTER ----------
 
 def should_skip(path: Path) -> bool:
     if any(part.startswith(".") for part in path.parts):
@@ -312,30 +86,107 @@ def should_skip(path: Path) -> bool:
     return False
 
 
-def ampy_mkdir(port, path: str):
-    subprocess.run(
-        ["ampy", "-p", port, "mkdir", path],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+# ============================================================
+# ================= MICRO-PY FLASHER =========================
+# ============================================================
+
+class MicroPyError(Exception):
+    pass
 
 
-def ensure_dirs(port, remote_path: str):
-    parts = remote_path.split("/")[:-1]
-    current = ""
-    for part in parts:
-        current = f"{current}/{part}" if current else part
-        ampy_mkdir(port, current)
+class MicroPyFlasher:
+    def __init__(self, port, baudrate=BAUDRATE):
+        self.port = port
+        self.ser = serial.Serial(port, baudrate, timeout=1)
+        time.sleep(1)
+        self._enter_repl()
+
+    def close(self):
+        self.ser.close()
+
+    # def _enter_repl(self):
+    #     self.ser.write(b"\r\x03\x03")
+    #     time.sleep(REPL_DELAY)
+    def _enter_repl(self):
+        # Interrupt any running program
+        self.ser.write(b"\x03\x03")
+        time.sleep(0.2)
+
+        # Enter RAW REPL ONLY
+        self.ser.write(b"\x01")  # Ctrl+A
+        time.sleep(0.2)
+
+        self.ser.reset_input_buffer()
+
+    def _exec(self, code: str):
+        self.ser.write(code.encode() + b"\r")
+        time.sleep(REPL_DELAY)
+
+    def _exec_capture(self, code: str) -> str:
+        self._exec("import sys")
+        self._exec("sys.stdout.write('<<<')")
+
+        for line in code.strip().splitlines():
+            self._exec(line)
+
+        self._exec("sys.stdout.write('>>>')")
+
+        out = b""
+        start = time.time()
+        while time.time() - start < 2:
+            if self.ser.in_waiting:
+                out += self.ser.read(self.ser.in_waiting)
+            if b">>>" in out:
+                break
+
+        data = out.decode(errors="ignore")
+        if "Traceback" in data:
+            raise MicroPyError(data)
+
+        return data.split("<<<")[-1].split(">>>")[0]
 
 
-def upload_file(port, local_path: Path, remote_path: str):
-    subprocess.run(
-        ["ampy", "-p", port, "put", str(local_path), remote_path],
-        check=True,
-    )
+    # ---------- FS OPS ----------
+
+    def mkdir(self, path):
+        self._exec_capture(f"""
+import os
+try:
+    os.mkdir("{path}")
+except OSError:
+    pass
+""")
+
+    def put(self, local: Path, remote: str):
+        data = local.read_bytes()
+        self._exec_capture(f"""
+f = open("{remote}", "wb")
+""")
+        for i in range(0, len(data), 512):
+            chunk = data[i:i+512]
+            self.ser.write(
+                b"f.write(" + repr(chunk).encode() + b")\r"
+            )
+            time.sleep(REPL_DELAY)
+        self._exec_capture("f.close()")
+
+    def ensure_dirs(self, remote_path: str):
+        parts = remote_path.split("/")[:-1]
+        cur = ""
+        for p in parts:
+            cur = f"{cur}/{p}" if cur else p
+            self.mkdir(cur)
+
+    def exit_raw_repl(self):
+        # Leave RAW REPL, return to normal REPL
+        self.ser.write(b"\x02")  # Ctrl+B
+        time.sleep(0.1)
 
 
-# ---------- GUI APP ----------
+
+# ============================================================
+# ======================= GUI APP ============================
+# ============================================================
 
 class CalSciApp(tk.Tk):
     def __init__(self):
@@ -354,8 +205,7 @@ class CalSciApp(tk.Tk):
         self.flash_btn.pack(fill="x", padx=10, pady=5)
         self.log_box.pack(fill="both", expand=True, padx=10, pady=5)
 
-    # -------- THREAD WRAPPERS --------
-    # (important to keep UI responsive)
+    # ---------- THREAD WRAPPERS ----------
 
     def start_update(self):
         threading.Thread(target=self.handle_update, daemon=True).start()
@@ -363,7 +213,7 @@ class CalSciApp(tk.Tk):
     def start_flash(self):
         threading.Thread(target=self.handle_flash, daemon=True).start()
 
-    # -------- BUTTON ACTIONS --------
+    # ---------- BUTTON ACTIONS ----------
 
     def handle_update(self):
         def log(msg): log_append(self.log_box, msg)
@@ -394,6 +244,8 @@ class CalSciApp(tk.Tk):
             port = ports[0]
             log(f"Detected ESP32 on {port}")
 
+            flasher = MicroPyFlasher(port)
+
             files = [
                 p for p in ROOT.rglob("*")
                 if p.is_file() and not should_skip(p)
@@ -413,8 +265,8 @@ class CalSciApp(tk.Tk):
                 size = path.stat().st_size
 
                 start = time.perf_counter()
-                ensure_dirs(port, remote_path)
-                upload_file(port, path, remote_path)
+                flasher.ensure_dirs(remote_path)
+                flasher.put(path, remote_path)
                 elapsed = time.perf_counter() - start
 
                 uploaded_chars += size
@@ -431,9 +283,10 @@ class CalSciApp(tk.Tk):
                 )
 
                 percent = (uploaded_chars / total_chars) * 100
-
                 log(f"[{i}/{total_files}] {percent:5.1f}% | ETA {eta} → {remote_path}")
-
+            flasher.exit_raw_repl()
+            flasher.close()
+            # flasher.close()
             log("🎉 Flashing complete!")
 
         except Exception as e:
