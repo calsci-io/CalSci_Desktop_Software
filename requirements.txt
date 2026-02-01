@@ -4,7 +4,7 @@ bitstring==4.3.1
 cffi==2.0.0
 click==8.3.1
 cryptography==46.0.4
-
+esptool==5.1.0
 gitdb==4.0.12
 GitPython==3.1.46
 intelhex==2.3.0
@@ -14,11 +14,11 @@ mpremote==1.27.0
 packaging==26.0
 platformdirs==4.5.1
 pycparser==3.0
+pygame==2.6.1
 Pygments==2.19.2
 pyinstaller==6.18.0
 pyinstaller-hooks-contrib==2026.0
 pyserial==3.5
-
 python-dotenv==1.2.1
 PyYAML==6.0.3
 reedsolo==1.7.0
