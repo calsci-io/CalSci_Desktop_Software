@@ -1,0 +1,777 @@
+{
+  "dynamic_menu_buffer_uploader.py": {
+    "size": 1845,
+    "mtime": 1769866562.3239865,
+    "hash": "a86ef0daf9c68267"
+  },
+  "add_2_nums.py": {
+    "size": 1111,
+    "mtime": 1769872494.116276,
+    "hash": "cb87a8625c6c68cd"
+  },
+  "boot.py": {
+    "size": 13829,
+    "mtime": 1769866562.3209865,
+    "hash": "06fbc629b0b6ea52"
+  },
+  "README.md": {
+    "size": 2428,
+    "mtime": 1769866562.3119864,
+    "hash": "5358256d803bafc2"
+  },
+  "new_app_handler.py": {
+    "size": 905,
+    "mtime": 1769866562.3299866,
+    "hash": "f7d4aeeb57ee67bd"
+  },
+  "test_keyboard.py": {
+    "size": 582,
+    "mtime": 1769866562.3329864,
+    "hash": "c9cb629f0311c9d3"
+  },
+  "clean.sh": {
+    "size": 827,
+    "mtime": 1769866562.3219864,
+    "hash": "f58c495fa0518521"
+  },
+  "upload.sh": {
+    "size": 1309,
+    "mtime": 1769866562.3329864,
+    "hash": "f7a189075f990b29"
+  },
+  "config.py": {
+    "size": 388,
+    "mtime": 1769866562.3219864,
+    "hash": "d06d8c12c8cc4317"
+  },
+  "process_modules/typer.py": {
+    "size": 1364,
+    "mtime": 1769866562.3329864,
+    "hash": "082ec4034010593f"
+  },
+  "download.sh": {
+    "size": 1515,
+    "mtime": 1769866562.3239865,
+    "hash": "f4369803384008e2"
+  },
+  "process_modules/graphics_buffer_uploader.py": {
+    "size": 0,
+    "mtime": 1769866562.3319864,
+    "hash": "d41d8cd98f00b204"
+  },
+  "main.py": {
+    "size": 850,
+    "mtime": 1769866562.3299866,
+    "hash": "0321ca1ae7ec2501"
+  },
+  "process_modules/text_buffer.py": {
+    "size": 8492,
+    "mtime": 1769866562.3329864,
+    "hash": "fe9be94b01f5bfba"
+  },
+  "process_modules/app_runner.py": {
+    "size": 590,
+    "mtime": 1769866562.3309865,
+    "hash": "fb38bbed95c7704c"
+  },
+  "process_modules/menu_buffer_old.py": {
+    "size": 2819,
+    "mtime": 1769866562.3319864,
+    "hash": "271c387e82fa215e"
+  },
+  "process_modules/navbar.py": {
+    "size": 338,
+    "mtime": 1769866562.3319864,
+    "hash": "2ba667fea5b2504e"
+  },
+  "process_modules/form_buffer_uploader.py": {
+    "size": 2635,
+    "mtime": 1769866562.3319864,
+    "hash": "b9c8582635d23a2f"
+  },
+  "process_modules/app_handler.py": {
+    "size": 1210,
+    "mtime": 1769866562.3309865,
+    "hash": "547416bfda13e77e"
+  },
+  "process_modules/boot_up_data_update.py": {
+    "size": 640,
+    "mtime": 1769866562.3309865,
+    "hash": "5ae60abdb161030e"
+  },
+  "process_modules/app_downloader.py": {
+    "size": 4081,
+    "mtime": 1769866562.3309865,
+    "hash": "d222ec90c01cc51f"
+  },
+  "process_modules/menu_buffer_uploader.py": {
+    "size": 1493,
+    "mtime": 1769866562.3319864,
+    "hash": "7caec94bc9c372b4"
+  },
+  "process_modules/auto_wifi_connector.py": {
+    "size": 2204,
+    "mtime": 1769866562.3309865,
+    "hash": "7ef5c2867ff3bdf8"
+  },
+  "process_modules/text_buffer_uploader.py": {
+    "size": 3169,
+    "mtime": 1769866562.3329864,
+    "hash": "7e5b5d5a2cfcaa6c"
+  },
+  "process_modules/update_feature.py": {
+    "size": 3058,
+    "mtime": 1769866562.3329864,
+    "hash": "df5d5fb69de184e9"
+  },
+  "data_modules/characters.py": {
+    "size": 5337,
+    "mtime": 1769866562.3219864,
+    "hash": "dc447f357866e898"
+  },
+  "process_modules/nav_buffer_uploader.py": {
+    "size": 2104,
+    "mtime": 1769866562.3319864,
+    "hash": "1c1dc531402a7da4"
+  },
+  "process_modules/app.py": {
+    "size": 572,
+    "mtime": 1769866562.3309865,
+    "hash": "0f879b80b1db3a35"
+  },
+  "process_modules/form_buffer.py": {
+    "size": 8372,
+    "mtime": 1769866562.3309865,
+    "hash": "1b9e79a79d376177"
+  },
+  "process_modules/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3309865,
+    "hash": "d41d8cd98f00b204"
+  },
+  "process_modules/menu_buffer.py": {
+    "size": 2819,
+    "mtime": 1769866562.3319864,
+    "hash": "881121242e4e2f82"
+  },
+  "data_modules/configuration.py": {
+    "size": 303,
+    "mtime": 1769866562.3219864,
+    "hash": "b2282f17e2cfeb0b"
+  },
+  "process_modules/nav_buffer.py": {
+    "size": 1854,
+    "mtime": 1769866562.3319864,
+    "hash": "01338d571374c176"
+  },
+  "data_modules/object_handler.py": {
+    "size": 11548,
+    "mtime": 1769866562.3229866,
+    "hash": "8724a7483006658a"
+  },
+  "data_modules/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3219864,
+    "hash": "d41d8cd98f00b204"
+  },
+  "data_modules/keypad_map.py": {
+    "size": 3691,
+    "mtime": 1769866562.3229866,
+    "hash": "f6b0e89fcd4d19ec"
+  },
+  "lib/sleeping_features.py": {
+    "size": 1080,
+    "mtime": 1769866562.3269866,
+    "hash": "b938f7e0c38716e6"
+  },
+  "lib/max31865.py": {
+    "size": 2290,
+    "mtime": 1769866562.3259864,
+    "hash": "34e7a08cbc7f42ba"
+  },
+  "lib/settings.py": {
+    "size": 217,
+    "mtime": 1769866562.3259864,
+    "hash": "3d78d70c738065b4"
+  },
+  "lib/calculator.py": {
+    "size": 0,
+    "mtime": 1769866562.3249865,
+    "hash": "d41d8cd98f00b204"
+  },
+  "lib/upysh.mpy": {
+    "size": 1645,
+    "mtime": 1769866562.3289864,
+    "hash": "acf2fd83c707d109"
+  },
+  "lib/test_thread.py": {
+    "size": 1396,
+    "mtime": 1769866562.3269866,
+    "hash": "094d780938e2cc19"
+  },
+  "lib/test_async.py": {
+    "size": 551,
+    "mtime": 1769866562.3269866,
+    "hash": "d2505906f798d5f7"
+  },
+  "data_modules/db_instance.py": {
+    "size": 68,
+    "mtime": 1769866562.3229866,
+    "hash": "1070e70ac58b4b97"
+  },
+  "lib/graph.py": {
+    "size": 0,
+    "mtime": 1769866562.3259864,
+    "hash": "d41d8cd98f00b204"
+  },
+  "lib/dht.mpy": {
+    "size": 595,
+    "mtime": 1769866562.3249865,
+    "hash": "2f6ebc0ae64163f4"
+  },
+  "lib/soft_watch_dog_timer.py": {
+    "size": 1523,
+    "mtime": 1769866562.3269866,
+    "hash": "355db1ce485dd09e"
+  },
+  "lib/bootup_configs.py": {
+    "size": 5888,
+    "mtime": 1769866562.3249865,
+    "hash": "083e94e41472461e"
+  },
+  "lib/hcsr04.py": {
+    "size": 989,
+    "mtime": 1769866562.3259864,
+    "hash": "98e6bc0c80287ae3"
+  },
+  "lib/ssl.mpy": {
+    "size": 745,
+    "mtime": 1769866562.3269866,
+    "hash": "00f1a74726fd880a"
+  },
+  "lib/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3249865,
+    "hash": "d41d8cd98f00b204"
+  },
+  "db/matrix_operations_app_list.json": {
+    "size": 1344,
+    "mtime": 1769866562.3239865,
+    "hash": "a0e62b8575a76121"
+  },
+  "db/nav.json": {
+    "size": 0,
+    "mtime": 1769866562.3239865,
+    "hash": "d41d8cd98f00b204"
+  },
+  "db/scientific_calculator_app_list.json": {
+    "size": 693,
+    "mtime": 1769866562.3239865,
+    "hash": "cde0e3e6d86ea6ea"
+  },
+  "db/wifi.json": {
+    "size": 256,
+    "mtime": 1769866562.3239865,
+    "hash": "d98ac08b7bae5575"
+  },
+  "db/functions_data.json": {
+    "size": 869,
+    "mtime": 1769866562.3229866,
+    "hash": "29100b6d9efe18ca"
+  },
+  "db/settings.json": {
+    "size": 344,
+    "mtime": 1769866562.3239865,
+    "hash": "34dd76cd5936d63b"
+  },
+  "db/installed_apps.json": {
+    "size": 1137,
+    "mtime": 1769866562.3239865,
+    "hash": "be8d41b17e5af30b"
+  },
+  "lib/slave_data_sender.py": {
+    "size": 2227,
+    "mtime": 1769866562.3269866,
+    "hash": "1a3e51f97c9f92e0"
+  },
+  "db/application_modules_app_list.json": {
+    "size": 789,
+    "mtime": 1769866562.3229866,
+    "hash": "1eabff1d3b0a2b6b"
+  },
+  "db/settings_app_list.json": {
+    "size": 1323,
+    "mtime": 1769866562.3239865,
+    "hash": "0fe138a5d4de6e04"
+  },
+  "db/about_calsci_app_list.json": {
+    "size": 84,
+    "mtime": 1769866562.3229866,
+    "hash": "6a6c4fe55071a5c3"
+  },
+  "apps/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3129866,
+    "hash": "d41d8cd98f00b204"
+  },
+  "input_modules/keypad.py": {
+    "size": 2499,
+    "mtime": 1769866562.3249865,
+    "hash": "f1ccb05777c3ffc0"
+  },
+  "input_modules/keypad_old.py": {
+    "size": 1045,
+    "mtime": 1769866562.3249865,
+    "hash": "4958b1f19482e7b9"
+  },
+  "input_modules/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3249865,
+    "hash": "d41d8cd98f00b204"
+  },
+  "certs/AmazonRootCA1.der": {
+    "size": 837,
+    "mtime": 1769866562.3219864,
+    "hash": "3129f632ef892f00"
+  },
+  "db/boot_up.json": {
+    "size": 488,
+    "mtime": 1769866562.3229866,
+    "hash": "45feec4f27056727"
+  },
+  "certs/cert.der": {
+    "size": 861,
+    "mtime": 1769866562.3219864,
+    "hash": "89ae6f6d6b5dedf1"
+  },
+  "lib/tinydb/operations.py": {
+    "size": 1225,
+    "mtime": 1769866562.3279865,
+    "hash": "82157103616deee0"
+  },
+  "apps/README.md": {
+    "size": 118,
+    "mtime": 1769866562.3129866,
+    "hash": "a7b52d5056fb65d0"
+  },
+  "lib/tinydb/database.py": {
+    "size": 8668,
+    "mtime": 1769866562.3269866,
+    "hash": "c16eb5991b623d6c"
+  },
+  "lib/tinydb/queries.py": {
+    "size": 14234,
+    "mtime": 1769866562.3279865,
+    "hash": "a3a9a0a821374154"
+  },
+  "certs/private.der": {
+    "size": 1218,
+    "mtime": 1769866562.3219864,
+    "hash": "b32232eb64c13820"
+  },
+  "lib/tinydb/table.py": {
+    "size": 23493,
+    "mtime": 1769866562.3279865,
+    "hash": "178dd07794e71457"
+  },
+  "lib/tinydb/__init__.py": {
+    "size": 972,
+    "mtime": 1769866562.3269866,
+    "hash": "b916389f39f5e07a"
+  },
+  "lib/tinydb/version.py": {
+    "size": 23,
+    "mtime": 1769866562.3289864,
+    "hash": "fcf396dbd931f5d1"
+  },
+  "lib/tinydb/storages.py": {
+    "size": 4814,
+    "mtime": 1769866562.3279865,
+    "hash": "4e50c1f84ba1ffbb"
+  },
+  "lib/dynamic_stuff/dynamic_menu_buffer_data_generator.py": {
+    "size": 592,
+    "mtime": 1769866562.3259864,
+    "hash": "683c839ceb03482b"
+  },
+  "lib/dynamic_stuff/dynamic_form_buffer_uploader.py": {
+    "size": 3461,
+    "mtime": 1769866562.3259864,
+    "hash": "0a25b6824e4efb2b"
+  },
+  "lib/dynamic_stuff/dynamic_menu_buffer_uploader.py": {
+    "size": 1845,
+    "mtime": 1769866562.3259864,
+    "hash": "dda795ad9d5206a5"
+  },
+  "lib/tinydb/middlewares.py": {
+    "size": 3977,
+    "mtime": 1769866562.3279865,
+    "hash": "be02d5aa032ef365"
+  },
+  "lib/dynamic_stuff/dynamic_switches.py": {
+    "size": 47,
+    "mtime": 1769866562.3259864,
+    "hash": "f4a231a8b1c320df"
+  },
+  "lib/tinydb/utils.py": {
+    "size": 3791,
+    "mtime": 1769866562.3289864,
+    "hash": "14982f747e8d7cf5"
+  },
+  "lib/usb/device/keyboard.mpy": {
+    "size": 2103,
+    "mtime": 1769866562.3299866,
+    "hash": "d314a4500b141a61"
+  },
+  "lib/dynamic_stuff/dynamic_data.py": {
+    "size": 47,
+    "mtime": 1769866562.3259864,
+    "hash": "b6ea8478a1acbd9f"
+  },
+  "lib/dynamic_stuff/dynamic_functions.py": {
+    "size": 636,
+    "mtime": 1769866562.3259864,
+    "hash": "569e9d7e8261203f"
+  },
+  "lib/umqtt/simple.mpy": {
+    "size": 2380,
+    "mtime": 1769866562.3289864,
+    "hash": "c101a0776cfaa9a4"
+  },
+  "lib/usb/device/hid.mpy": {
+    "size": 1529,
+    "mtime": 1769866562.3299866,
+    "hash": "a8fdb61ea3e5356f"
+  },
+  "lib/umqtt/robust.mpy": {
+    "size": 744,
+    "mtime": 1769866562.3289864,
+    "hash": "4e42b44129bbff1a"
+  },
+  "lib/dynamic_stuff/dynamic_form_buffer_data_generator.py": {
+    "size": 566,
+    "mtime": 1769866562.3259864,
+    "hash": "21a1c7bd56e2f07c"
+  },
+  "lib/usb/device/mouse.mpy": {
+    "size": 811,
+    "mtime": 1769866562.3299866,
+    "hash": "bb867b0a1737093a"
+  },
+  "lib/usb/device/cdc.mpy": {
+    "size": 2937,
+    "mtime": 1769866562.3299866,
+    "hash": "0b3b7ccb83ab8b40"
+  },
+  "apps/root/installed_apps.py": {
+    "size": 1355,
+    "mtime": 1769866562.3169866,
+    "hash": "c517f73defd06084"
+  },
+  "lib/usb/device/core.mpy": {
+    "size": 4411,
+    "mtime": 1769866562.3299866,
+    "hash": "932d145bae341b75"
+  },
+  "lib/usb/device/midi.mpy": {
+    "size": 1902,
+    "mtime": 1769866562.3299866,
+    "hash": "49a5767a6a216e8d"
+  },
+  "lib/usb/device/__init__.mpy": {
+    "size": 97,
+    "mtime": 1769866562.3299866,
+    "hash": "cb6c5b427691d7c5"
+  },
+  "apps/root/chatbot_ai.py": {
+    "size": 1333,
+    "mtime": 1769866562.3149865,
+    "hash": "52437c425098aff6"
+  },
+  "apps/root/calculate.py": {
+    "size": 6857,
+    "mtime": 1769866562.3149865,
+    "hash": "d762274937a32909"
+  },
+  "apps/root/settings.py": {
+    "size": 2018,
+    "mtime": 1769866562.3169866,
+    "hash": "372950a7b525a8e6"
+  },
+  "apps/scientific_calculator/constants.py": {
+    "size": 1703,
+    "mtime": 1769866562.3169866,
+    "hash": "6f9ec5a122e061c2"
+  },
+  "apps/root/scientific_calculator.py": {
+    "size": 1790,
+    "mtime": 1769866562.3169866,
+    "hash": "1b36fcea1f72dba9"
+  },
+  "apps/root/toolbox.py": {
+    "size": 1485,
+    "mtime": 1769866562.3169866,
+    "hash": "6d1a159eddfe1b0f"
+  },
+  "apps/root/home.py": {
+    "size": 1251,
+    "mtime": 1769866562.3169866,
+    "hash": "7d308117b2a8ccd1"
+  },
+  "apps/root/functions.py": {
+    "size": 1382,
+    "mtime": 1769866562.3159864,
+    "hash": "36b36c4c99ebf87f"
+  },
+  "apps/scientific_calculator/transpose.py": {
+    "size": 3157,
+    "mtime": 1769866562.3189864,
+    "hash": "6f9ec5a122e061c2"
+  },
+  "apps/root/error_screen.py": {
+    "size": 1693,
+    "mtime": 1769866562.3159864,
+    "hash": "d4d2047e8ecf2dfb"
+  },
+  "apps/root/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3149865,
+    "hash": "d41d8cd98f00b204"
+  },
+  "apps/scientific_calculator/mymolecule.py": {
+    "size": 1822,
+    "mtime": 1769866562.3189864,
+    "hash": "0d2e2c73d76dd370"
+  },
+  "apps/scientific_calculator/matrix_operations.py": {
+    "size": 1596,
+    "mtime": 1769866562.3179865,
+    "hash": "1f7f4f5f2a88169d"
+  },
+  "apps/scientific_calculator/lu_decomposition.py": {
+    "size": 4439,
+    "mtime": 1769866562.3179865,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/scientific_calculator/determinant.py": {
+    "size": 3812,
+    "mtime": 1769866562.3179865,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/scientific_calculator/matrix_mul_2.py": {
+    "size": 4104,
+    "mtime": 1769866562.3179865,
+    "hash": "4067cf45df173d8b"
+  },
+  "apps/scientific_calculator/row_echelon_form.py": {
+    "size": 4638,
+    "mtime": 1769866562.3189864,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/scientific_calculator/eigen_values.py": {
+    "size": 4830,
+    "mtime": 1769866562.3179865,
+    "hash": "0e3b11bbab9d5d59"
+  },
+  "apps/scientific_calculator/matrix_inverse.py": {
+    "size": 4087,
+    "mtime": 1769866562.3179865,
+    "hash": "1869195c2e67ddd5"
+  },
+  "apps/scientific_calculator/qr_decomposition.py": {
+    "size": 4472,
+    "mtime": 1769866562.3189864,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/scientific_calculator/reduced_row_echelon.py": {
+    "size": 5019,
+    "mtime": 1769866562.3189864,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/scientific_calculator/add_matrices.py": {
+    "size": 4085,
+    "mtime": 1769866562.3169866,
+    "hash": "6f9ec5a122e061c2"
+  },
+  "apps/scientific_calculator/graph.py": {
+    "size": 15515,
+    "mtime": 1769866562.3179865,
+    "hash": "2ae80f9fdbb3eb11"
+  },
+  "apps/scientific_calculator/quad_eqn_sol.py": {
+    "size": 2104,
+    "mtime": 1769866562.3189864,
+    "hash": "4067cf45df173d8b"
+  },
+  "apps/settings/backlight.py": {
+    "size": 941,
+    "mtime": 1769866562.3199866,
+    "hash": "e5336c19079d8325"
+  },
+  "apps/scientific_calculator/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3169866,
+    "hash": "d41d8cd98f00b204"
+  },
+  "apps/scientific_calculator/rank.py": {
+    "size": 3744,
+    "mtime": 1769866562.3189864,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/scientific_calculator/simultanious_eqn_sol.py": {
+    "size": 1819,
+    "mtime": 1769866562.3189864,
+    "hash": "22c06171f7f59511"
+  },
+  "apps/settings/download_updates.py": {
+    "size": 3313,
+    "mtime": 1769866562.3199866,
+    "hash": "964d4897e4caaa26"
+  },
+  "apps/settings/wifi_connector.py": {
+    "size": 4252,
+    "mtime": 1769866562.3209865,
+    "hash": "669b20ce57fdbdde"
+  },
+  "apps/settings/contrast.py": {
+    "size": 1892,
+    "mtime": 1769866562.3199866,
+    "hash": "2c2e2bb0ebca1479"
+  },
+  "apps/settings/auto_sleep.py": {
+    "size": 6118,
+    "mtime": 1769866562.3199866,
+    "hash": "0c2bea58e7a22f0c"
+  },
+  "apps/settings/wifi_autoconnect.py": {
+    "size": 1703,
+    "mtime": 1769866562.3209865,
+    "hash": "67559e1876120784"
+  },
+  "apps/settings/sleep_after.py": {
+    "size": 2917,
+    "mtime": 1769866562.3209865,
+    "hash": "64c6700f8d1be528"
+  },
+  "apps/settings/update.py": {
+    "size": 1598,
+    "mtime": 1769866562.3209865,
+    "hash": "9ea8bf3cf100a3a3"
+  },
+  "apps/settings/about_calsci.py": {
+    "size": 0,
+    "mtime": 1769866562.3199866,
+    "hash": "d41d8cd98f00b204"
+  },
+  "apps/settings/battery_status.py": {
+    "size": 5387,
+    "mtime": 1769866562.3199866,
+    "hash": "2d0a439974c1ac1a"
+  },
+  "apps/settings/__init__.py": {
+    "size": 0,
+    "mtime": 1769866562.3189864,
+    "hash": "d41d8cd98f00b204"
+  },
+  "apps/settings/dark_mode.py": {
+    "size": 819,
+    "mtime": 1769866562.3199866,
+    "hash": "e8ef9b999d330c6d"
+  },
+  "apps/installed_apps/master_slave.py": {
+    "size": 50,
+    "mtime": 1769866562.3139865,
+    "hash": "af1c6fcc894df873"
+  },
+  "apps/settings/mac_address.py": {
+    "size": 2904,
+    "mtime": 1769866562.3199866,
+    "hash": "05573052d4e0d104"
+  },
+  "apps/settings/network_status.py": {
+    "size": 1822,
+    "mtime": 1769866562.3209865,
+    "hash": "7c00a971e6816670"
+  },
+  "apps/installed_apps/slave_connector.py": {
+    "size": 1756,
+    "mtime": 1769866562.3149865,
+    "hash": "80cae0b3b2c2d438"
+  },
+  "apps/installed_apps/flame_sensor.py": {
+    "size": 1892,
+    "mtime": 1769866562.3139865,
+    "hash": "db8191d9982f28ca"
+  },
+  "apps/settings/wifi_app.py": {
+    "size": 1772,
+    "mtime": 1769866562.3209865,
+    "hash": "171d749aa3824199"
+  },
+  "apps/installed_apps/set.py": {
+    "size": 2050,
+    "mtime": 1769866562.3139865,
+    "hash": "4a2aa8417a319b6f"
+  },
+  "apps/installed_apps/temp_sensor.py": {
+    "size": 11040,
+    "mtime": 1769866562.3149865,
+    "hash": "6d905f376551d060"
+  },
+  "apps/installed_apps/dsgroup.py": {
+    "size": 2850,
+    "mtime": 1769866562.3139865,
+    "hash": "7f068781003fe25a"
+  },
+  "apps/installed_apps/add_2_nums.py": {
+    "size": 1323,
+    "mtime": 1769866562.3129866,
+    "hash": "e49282439df21be2"
+  },
+  "apps/installed_apps/data_reciever.py": {
+    "size": 4225,
+    "mtime": 1769866562.3129866,
+    "hash": "2d0a439974c1ac1a"
+  },
+  "apps/installed_apps/buzzer.py": {
+    "size": 1520,
+    "mtime": 1769866562.3129866,
+    "hash": "bac029ce21085920"
+  },
+  "apps/installed_apps/rgb.py": {
+    "size": 3754,
+    "mtime": 1769866562.3139865,
+    "hash": "ac0b91ebed4e2466"
+  },
+  "apps/root/functions_apps/recently_used.py": {
+    "size": 1771,
+    "mtime": 1769866562.3169866,
+    "hash": "4237713e84c9753e"
+  },
+  "apps/installed_apps/dynamic_form.py": {
+    "size": 4302,
+    "mtime": 1769866562.3139865,
+    "hash": "be76843a75e968f2"
+  },
+  "apps/installed_apps/dht11.py": {
+    "size": 3026,
+    "mtime": 1769866562.3139865,
+    "hash": "d3c5422e29f12f34"
+  },
+  "apps/installed_apps/ultra_sonic_sensor.py": {
+    "size": 2869,
+    "mtime": 1769866562.3149865,
+    "hash": "a5727ce7c20cbf3d"
+  },
+  "apps/root/functions_apps/create_new.py": {
+    "size": 4561,
+    "mtime": 1769866562.3159864,
+    "hash": "6331793acc15b3a9"
+  },
+  "apps/installed_apps/rv.py": {
+    "size": 7162,
+    "mtime": 1769877879.508664,
+    "hash": "b580a088474ad365"
+  }
+}
