@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QFrame, QStatusBar, QMessageBox, QPlainTextEdit, QTabWidget, QMenu,
     QDialog
 )
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QEvent
 from PySide6.QtGui import QColor, QFont, QAction, QTextCursor
 
 # Import from modular files
@@ -39,7 +39,10 @@ class CalSciApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CalSci Flasher")
-        self.setMinimumSize(820, 660)
+        self._normal_size = QSize(940, 660)
+        self._lock_resize = False
+        self.setMinimumSize(self._normal_size)
+        self.resize(self._normal_size)
 
         self.bridge = SignalBridge()
         self.bridge.log_signal.connect(self._on_log)
@@ -59,6 +62,15 @@ class CalSciApp(QMainWindow):
         self.device_timer.timeout.connect(self._check_device_status)
         self.device_timer.start(2000)
         self._check_device_status()
+
+    def resizeEvent(self, event):
+        if not self.isMaximized() and not self.isFullScreen():
+            if not self._lock_resize and self.size() != self._normal_size:
+                self._lock_resize = True
+                self.resize(self._normal_size)
+                self._lock_resize = False
+                return
+        super().resizeEvent(event)
 
     def _build_ui(self):
         central = QWidget()
@@ -113,12 +125,12 @@ class CalSciApp(QMainWindow):
         self.flash_fw_cb.setObjectName("retryCheckbox")
         left_layout.addWidget(self.flash_fw_cb)
 
-        self.delta_btn = QPushButton("Sync (Delta)")
+        self.delta_btn = QPushButton("Sync Files")
         self.delta_btn.setObjectName("btnSecondary")
         self.delta_btn.clicked.connect(self._handle_delta_sync)
         left_layout.addWidget(self.delta_btn)
 
-        self.browse_btn = QPushButton("Browse CalSci Files…")
+        self.browse_btn = QPushButton("Code Editor")
         self.browse_btn.setObjectName("btnSecondary")
         self.browse_btn.clicked.connect(self._open_file_browser)
         left_layout.addWidget(self.browse_btn)

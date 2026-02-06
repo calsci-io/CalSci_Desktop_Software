@@ -581,6 +581,95 @@ class CodeEditor(QPlainTextEdit):
         # Autocomplete setup
         self._setup_completer()
 
+        # Custom undo/redo (character-wise)
+        self.setUndoRedoEnabled(False)
+        self._undo_stack = []
+        self._redo_stack = []
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self.document().contentsChange.connect(self._on_contents_change)
+
+        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.undo_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.undo_shortcut.activated.connect(self._custom_undo)
+        self.redo_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self.redo_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.redo_shortcut.activated.connect(self._custom_redo)
+        self.redo_shortcut2 = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.redo_shortcut2.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.redo_shortcut2.activated.connect(self._custom_redo)
+
+    def setPlainText(self, text):
+        self._suppress_undo_record = True
+        super().setPlainText(text)
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+    def _on_contents_change(self, position, chars_removed, chars_added):
+        new_text = self.toPlainText()
+        if self._suppress_undo_record:
+            self._last_text = new_text
+            return
+
+        old_text = self._last_text
+        removed_text = old_text[position:position + chars_removed] if chars_removed else ""
+        added_text = new_text[position:position + chars_added] if chars_added else ""
+
+        if removed_text or added_text:
+            # Record removals first (per-character, same position),
+            # then additions (per-character, advancing position).
+            if removed_text:
+                for ch in removed_text:
+                    self._undo_stack.append((position, ch, ""))
+            if added_text:
+                for i, ch in enumerate(added_text):
+                    self._undo_stack.append((position + i, "", ch))
+            self._redo_stack.clear()
+
+        self._last_text = new_text
+
+    def _custom_undo(self):
+        if not self._undo_stack:
+            return
+
+        position, removed_text, added_text = self._undo_stack.pop()
+        self._suppress_undo_record = True
+
+        cursor = self.textCursor()
+        cursor.setPosition(position)
+        if added_text:
+            cursor.setPosition(position + len(added_text), QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        if removed_text:
+            cursor.insertText(removed_text)
+        self.setTextCursor(cursor)
+
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self._redo_stack.append((position, removed_text, added_text))
+
+    def _custom_redo(self):
+        if not self._redo_stack:
+            return
+
+        position, removed_text, added_text = self._redo_stack.pop()
+        self._suppress_undo_record = True
+
+        cursor = self.textCursor()
+        cursor.setPosition(position)
+        if removed_text:
+            cursor.setPosition(position + len(removed_text), QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        if added_text:
+            cursor.insertText(added_text)
+        self.setTextCursor(cursor)
+
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self._undo_stack.append((position, removed_text, added_text))
+
     def line_number_area_width(self):
         digits = 1
         max_num = max(1, self.blockCount())
@@ -779,6 +868,12 @@ class CodeEditor(QPlainTextEdit):
 
     def keyPressEvent(self, event):
         """Handle key press for autocomplete with dot-completion support."""
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self._custom_undo()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self._custom_redo()
+            return
         # If completer popup is visible, let it handle certain keys
         if self.completer.popup().isVisible():
             if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return,
@@ -819,7 +914,6 @@ class CodeEditor(QPlainTextEdit):
         # Check if this is a dot key press
         is_dot = event.text() == '.'
 
-        # Default key handling
         super().keyPressEvent(event)
 
         # Handle dot-completion trigger
@@ -1083,6 +1177,10 @@ class ESP32FileBrowser(QMainWindow):
 
         self.open_files = {}
         self.find_dialog = None
+        self._log_panel_sizes = None
+        self._log_collapsed = False
+        self._normal_size = QSize(1200, 800)
+        self._lock_resize = False
 
         # Track the file that was last run with Save & Run
         # Used to detect when user switches to a different file
@@ -1090,7 +1188,8 @@ class ESP32FileBrowser(QMainWindow):
         self._needs_main_restore = False  # Flag to restore main.py on reconnect
 
         self.setWindowTitle("CalSci File Browser")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(self._normal_size)
+        self.resize(self._normal_size)
 
         self._build_ui()
         self._apply_stylesheet()
@@ -1112,6 +1211,15 @@ class ESP32FileBrowser(QMainWindow):
 
         self.file_tree.itemExpanded.connect(self._on_tree_item_expanded)
         self._scan_device()
+
+    def resizeEvent(self, event):
+        if not self.isMaximized() and not self.isFullScreen():
+            if not self._lock_resize and self.size() != self._normal_size:
+                self._lock_resize = True
+                self.resize(self._normal_size)
+                self._lock_resize = False
+                return
+        super().resizeEvent(event)
 
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
@@ -1256,8 +1364,8 @@ class ESP32FileBrowser(QMainWindow):
         right_layout.setSpacing(0)
 
         # Splitter for editor and log panel
-        editor_splitter = QSplitter(Qt.Orientation.Vertical)
-        editor_splitter.setObjectName("editorSplitter")
+        self.editor_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.editor_splitter.setObjectName("editorSplitter")
 
         # Tab widget for open files
         self.tab_widget = QTabWidget()
@@ -1267,7 +1375,7 @@ class ESP32FileBrowser(QMainWindow):
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.tabCloseRequested.connect(self._close_tab)
         # Note: currentChanged signal connected after all widgets are created (see below)
-        editor_splitter.addWidget(self.tab_widget)
+        self.editor_splitter.addWidget(self.tab_widget)
 
         # Log panel (collapsible)
         self.log_panel = QFrame()
@@ -1277,9 +1385,9 @@ class ESP32FileBrowser(QMainWindow):
         log_layout.setSpacing(0)
 
         # Log header with title and buttons
-        log_header = QFrame()
-        log_header.setObjectName("logHeader")
-        log_header_layout = QHBoxLayout(log_header)
+        self.log_header = QFrame()
+        self.log_header.setObjectName("logHeader")
+        log_header_layout = QHBoxLayout(self.log_header)
         log_header_layout.setContentsMargins(12, 4, 8, 4)
 
         log_title = QLabel("OUTPUT")
@@ -1302,7 +1410,7 @@ class ESP32FileBrowser(QMainWindow):
         self.toggle_log_btn.clicked.connect(self._toggle_log_panel)
         log_header_layout.addWidget(self.toggle_log_btn)
 
-        log_layout.addWidget(log_header)
+        log_layout.addWidget(self.log_header)
 
         # Log text area
         self.log_output = QPlainTextEdit()
@@ -1311,10 +1419,10 @@ class ESP32FileBrowser(QMainWindow):
         self.log_output.setMaximumBlockCount(1000)  # Limit log lines
         log_layout.addWidget(self.log_output)
 
-        editor_splitter.addWidget(self.log_panel)
-        editor_splitter.setSizes([600, 200])  # Editor gets more space initially
+        self.editor_splitter.addWidget(self.log_panel)
+        self.editor_splitter.setSizes([600, 200])  # Editor gets more space initially
 
-        right_layout.addWidget(editor_splitter)
+        right_layout.addWidget(self.editor_splitter)
 
         # Welcome tab when no file is open
         self.welcome_widget = QWidget()
@@ -1407,11 +1515,18 @@ class ESP32FileBrowser(QMainWindow):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1e1e1e;
+                color: #d0d0d0;
+                font-family: 'Fira Sans', 'Noto Sans', 'DejaVu Sans', sans-serif;
+                font-size: 12px;
+            }
+            QWidget {
+                color: #d0d0d0;
+                font-family: 'Fira Sans', 'Noto Sans', 'DejaVu Sans', sans-serif;
             }
 
             QFrame#header {
-                background-color: #141414;
-                border-bottom: 1px solid #333;
+                background-color: #151515;
+                border-bottom: 1px solid #2b2b2b;
             }
 
             QLabel#deviceLabel {
@@ -1421,7 +1536,7 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QLabel#pathLabel {
-                color: #888;
+                color: #a0a0a0;
                 font-size: 11px;
             }
 
@@ -1430,8 +1545,8 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QFrame#explorerHeader {
-                background-color: #1a1a1a;
-                border-bottom: 1px solid #333;
+                background-color: #161616;
+                border-bottom: 1px solid #262626;
             }
 
             QLabel#sectionLabel {
@@ -1443,18 +1558,19 @@ class ESP32FileBrowser(QMainWindow):
 
             QToolButton#toolBtn {
                 background-color: transparent;
-                color: #888;
-                border: none;
-                border-radius: 3px;
+                color: #9a9a9a;
+                border: 1px solid transparent;
+                border-radius: 4px;
                 padding: 4px 6px;
                 font-size: 12px;
             }
             QToolButton#toolBtn:hover {
-                background-color: rgba(233, 84, 32, 0.3);
+                background-color: #262626;
+                border-color: #303030;
                 color: #e95420;
             }
             QToolButton#toolBtn:pressed {
-                background-color: rgba(233, 84, 32, 0.5);
+                background-color: rgba(233, 84, 32, 0.35);
             }
 
             QFrame#searchFrame {
@@ -1463,12 +1579,13 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QLineEdit#searchInput {
-                background-color: #2a2a2a;
-                color: #cccccc;
-                border: 1px solid #3a3a3a;
+                background-color: #252525;
+                color: #d0d0d0;
+                border: 1px solid #303030;
                 border-radius: 4px;
-                padding: 6px 8px;
+                padding: 6px 10px;
                 font-size: 12px;
+                selection-background-color: rgba(233, 84, 32, 0.35);
             }
             QLineEdit#searchInput:focus {
                 border-color: #e95420;
@@ -1479,20 +1596,22 @@ class ESP32FileBrowser(QMainWindow):
 
             QTreeWidget#fileTree {
                 background-color: #1e1e1e;
-                color: #cccccc;
+                color: #cfcfcf;
                 border: none;
                 font-size: 13px;
                 outline: none;
             }
             QTreeWidget#fileTree::item {
-                padding: 4px 0px;
+                padding: 4px 6px;
+                border-radius: 3px;
             }
             QTreeWidget#fileTree::item:hover {
-                background-color: #2a2a2a;
+                background-color: #242424;
             }
             QTreeWidget#fileTree::item:selected {
-                background-color: rgba(233, 84, 32, 0.3);
+                background-color: #2b2b2b;
                 color: #ffffff;
+                border-left: 2px solid #e95420;
             }
             QTreeWidget#fileTree::branch:has-children:!has-siblings:closed,
             QTreeWidget#fileTree::branch:closed:has-children:has-siblings {
@@ -1517,21 +1636,23 @@ class ESP32FileBrowser(QMainWindow):
                 background-color: #141414;
             }
             QTabWidget#editorTabs QTabBar::tab {
-                background-color: #1a1a1a;
-                color: #888;
-                padding: 8px 20px;
+                background-color: #1b1b1b;
+                color: #9a9a9a;
+                padding: 7px 16px;
                 border: none;
-                border-right: 1px solid #141414;
+                border-right: 1px solid #131313;
+                border-top: 2px solid transparent;
                 font-size: 12px;
                 min-width: 80px;
             }
             QTabWidget#editorTabs QTabBar::tab:selected {
                 background-color: #1e1e1e;
-                color: #ffffff;
+                color: #f0f0f0;
                 border-top: 2px solid #e95420;
             }
             QTabWidget#editorTabs QTabBar::tab:hover:!selected {
-                background-color: #252525;
+                background-color: #242424;
+                color: #d0d0d0;
             }
             QTabWidget#editorTabs QTabBar::close-button {
                 image: none;
@@ -1545,9 +1666,9 @@ class ESP32FileBrowser(QMainWindow):
                 background-color: #1e1e1e;
                 color: #d4d4d4;
                 border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
+                font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
                 font-size: 13px;
-                selection-background-color: rgba(233, 84, 32, 0.4);
+                selection-background-color: rgba(233, 84, 32, 0.35);
             }
 
             QLabel#welcomeTitle {
@@ -1568,12 +1689,12 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QFrame#actionBar {
-                background-color: #141414;
-                border-top: 1px solid #333;
+                background-color: #151515;
+                border-top: 1px solid #262626;
             }
 
             QLabel#statusLabel {
-                color: #888;
+                color: #9a9a9a;
                 font-size: 11px;
             }
 
@@ -1646,13 +1767,13 @@ class ESP32FileBrowser(QMainWindow):
 
             QScrollBar:vertical {
                 background-color: #1e1e1e;
-                width: 12px;
+                width: 10px;
                 margin: 0;
             }
             QScrollBar::handle:vertical {
                 background-color: #3a3a3a;
                 min-height: 30px;
-                border-radius: 6px;
+                border-radius: 5px;
                 margin: 2px;
             }
             QScrollBar::handle:vertical:hover {
@@ -1667,13 +1788,13 @@ class ESP32FileBrowser(QMainWindow):
 
             QScrollBar:horizontal {
                 background-color: #1e1e1e;
-                height: 12px;
+                height: 10px;
                 margin: 0;
             }
             QScrollBar::handle:horizontal {
                 background-color: #3a3a3a;
                 min-width: 30px;
-                border-radius: 6px;
+                border-radius: 5px;
                 margin: 2px;
             }
             QScrollBar::handle:horizontal:hover {
@@ -1719,20 +1840,20 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QFrame#logPanel {
-                background-color: #1a1a1a;
-                border-top: 1px solid #333;
+                background-color: #171717;
+                border-top: 1px solid #262626;
             }
 
             QFrame#logHeader {
-                background-color: #141414;
-                border-bottom: 1px solid #2a2a2a;
+                background-color: #151515;
+                border-bottom: 1px solid #262626;
             }
 
             QPlainTextEdit#logOutput {
-                background-color: #0d0d0d;
+                background-color: #101010;
                 color: #d4d4d4;
                 border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
+                font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
                 font-size: 12px;
                 padding: 8px;
             }
@@ -2179,7 +2300,10 @@ class ESP32FileBrowser(QMainWindow):
 
         # If opening a different file than the last run file, note that system will reset
         if self._last_run_file and self._last_run_file != path:
-            self.bridge.run_log_signal.emit(f"ℹ️ Opening new file. Previous run ({self._last_run_file.split('/')[-1]}) will be reset on next Save & Run.", "info")
+            self.bridge.run_log_signal.emit(
+                f"ℹ️ Opening new file. Previous run ({self._last_run_file.split('/')[-1]}) will be reset on next Save & Run.",
+                "info"
+            )
 
         if path in self.open_files:
             for i in range(self.tab_widget.count()):
@@ -2266,14 +2390,20 @@ class ESP32FileBrowser(QMainWindow):
 
         if current_path and current_path in self.open_files:
             is_modified = self.open_files[current_path]["modified"]
+            self.save_upload_btn.setText("💾 Save & Upload")
+            self.save_upload_btn.setToolTip("Save and upload to CalSci")
             self.save_upload_btn.setEnabled(is_modified)
-            self.revert_btn.setEnabled(is_modified)
             # Save & Run enabled whenever a file is open
             self.save_run_btn.setEnabled(True)
+            self.save_run_btn.setToolTip("Save and run on CalSci")
+            self.revert_btn.setEnabled(is_modified)
         else:
             self.save_upload_btn.setEnabled(False)
             self.revert_btn.setEnabled(False)
             self.save_run_btn.setEnabled(False)
+            self.save_upload_btn.setText("💾 Save & Upload")
+            self.save_upload_btn.setToolTip("")
+            self.save_run_btn.setToolTip("")
 
     def _update_status(self, path=None):
         if not path:
@@ -2532,13 +2662,34 @@ class ESP32FileBrowser(QMainWindow):
     def _toggle_log_panel(self):
         """Toggle log panel visibility."""
         if self.log_output.isVisible():
+            # Collapse to header-only (VS Code style)
+            self._log_panel_sizes = self.editor_splitter.sizes()
             self.log_output.hide()
             self.toggle_log_btn.setText("▲")
             self.toggle_log_btn.setToolTip("Show Log Panel")
+
+            header_h = self.log_header.sizeHint().height()
+            collapsed_h = max(header_h + 6, 24)
+            self.log_panel.setMinimumHeight(collapsed_h)
+            self.log_panel.setMaximumHeight(collapsed_h)
+
+            if self._log_panel_sizes and len(self._log_panel_sizes) == 2:
+                total = sum(self._log_panel_sizes)
+                self.editor_splitter.setSizes([max(total - collapsed_h, 1), collapsed_h])
+            self._log_collapsed = True
         else:
+            # Expand to previous size
+            self.log_panel.setMinimumHeight(0)
+            self.log_panel.setMaximumHeight(16777215)
             self.log_output.show()
             self.toggle_log_btn.setText("▼")
             self.toggle_log_btn.setToolTip("Hide Log Panel")
+
+            if self._log_panel_sizes and len(self._log_panel_sizes) == 2:
+                self.editor_splitter.setSizes(self._log_panel_sizes)
+            else:
+                self.editor_splitter.setSizes([600, 200])
+            self._log_collapsed = False
 
     def _on_run_complete(self, path, success, output):
         """Handle run completion."""

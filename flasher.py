@@ -616,7 +616,7 @@ class MicroPyFlasher:
                 output += self.ser.read(self.ser.in_waiting)
                 if b"\x04" in output:
                     break
-            time.sleep(0.0005)
+            # time.sleep(0.0005)
 
         if b"\x04" in output:
             output = output.split(b"\x04")[0]
