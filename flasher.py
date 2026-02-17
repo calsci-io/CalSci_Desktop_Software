@@ -132,6 +132,59 @@ def _build_esptool_boot_cmd(port: str, baudrate: int, chip: str,
     ]
 
 
+def _build_esptool_multi_write_cmd(port: str, image_pairs, baudrate: int, chip: str,
+                                   before: str = ESP_BEFORE, after: str = ESP_AFTER,
+                                   connect_attempts: int = ESP_CONNECT_ATTEMPTS):
+    """Build esptool write-flash command with multiple offset/image pairs."""
+    if importlib.util.find_spec("esptool") is not None:
+        cmd = [
+            sys.executable, "-m", "esptool",
+            "--chip", chip,
+            "--port", port,
+            "--baud", str(baudrate),
+            "--connect-attempts", str(connect_attempts),
+            "--before", before,
+            "--after", after,
+            "write-flash",
+        ]
+    else:
+        cmd = [
+            "esptool",
+            "--chip", chip,
+            "--port", port,
+            "--baud", str(baudrate),
+            "--connect-attempts", str(connect_attempts),
+            "--before", before,
+            "--after", after,
+            "write-flash",
+        ]
+    for offset, image_path in image_pairs:
+        cmd.extend([str(offset), str(image_path)])
+    return cmd
+
+
+def _build_esptool_elf2image_cmd(elf_path: Path, output_path: Path, chip: str = ESP_CHIP):
+    if importlib.util.find_spec("esptool") is not None:
+        return [
+            sys.executable, "-m", "esptool",
+            "--chip", chip,
+            "elf2image",
+            "--flash_size", "16MB",
+            "--flash_mode", "dio",
+            str(elf_path),
+            "-o", str(output_path),
+        ]
+    return [
+        "esptool",
+        "--chip", chip,
+        "elf2image",
+        "--flash_size", "16MB",
+        "--flash_mode", "dio",
+        str(elf_path),
+        "-o", str(output_path),
+    ]
+
+
 def _run_esptool(cmd, log_func=None):
     if log_func:
         log_func(f"Running: {' '.join(cmd)}", "info")
@@ -154,14 +207,104 @@ def _run_esptool(cmd, log_func=None):
         raise MicroPyError(f"esptool failed (exit {ret}).\n{tail}")
 
 
+def _is_esptool_connect_error(error_text: str) -> bool:
+    msg = (error_text or "").lower()
+    needles = (
+        "write timeout",
+        "failed to connect",
+        "timed out waiting for packet header",
+        "serial exception",
+        "could not open port",
+        "device not found",
+        "no serial data received",
+    )
+    return any(n in msg for n in needles)
+
+
+def _retry_baud_candidates(primary_baud: int):
+    bauds = []
+    for baud in (460800, primary_baud, 230400, 115200):
+        try:
+            val = int(baud)
+        except Exception:
+            continue
+        if val > 0 and val not in bauds:
+            bauds.append(val)
+    return bauds
+
+
+def _run_esptool_with_connect_retries(
+    build_cmd,
+    *,
+    port: str,
+    chip: str,
+    baudrate: int,
+    after: str,
+    stage_name: str,
+    log_func=None,
+    before_modes=None,
+) -> str:
+    """Run esptool command with automatic retries for transient serial/connect errors."""
+    if before_modes is None:
+        ordered_modes = []
+        for mode in ("default-reset", ESP_BEFORE, "usb-reset"):
+            if mode and mode not in ordered_modes:
+                ordered_modes.append(mode)
+        before_modes = tuple(ordered_modes)
+
+    last_error = None
+    attempt = 0
+    for before_mode in before_modes:
+        for baud in _retry_baud_candidates(baudrate):
+            attempt += 1
+            if attempt > 1 and log_func:
+                log_func(
+                    f"{stage_name}: retry with --before {before_mode}, --baud {baud}",
+                    "warning",
+                )
+            try:
+                cmd = build_cmd(
+                    port=port,
+                    baudrate=baud,
+                    chip=chip,
+                    before=before_mode,
+                    after=after,
+                )
+                _run_esptool(cmd, log_func=log_func)
+                return _wait_for_port(port, log_func=log_func)
+            except MicroPyError as e:
+                last_error = e
+                if not _is_esptool_connect_error(str(e)):
+                    raise
+                time.sleep(0.5)
+                port = _wait_for_port(port, log_func=log_func)
+    if last_error is None:
+        raise MicroPyError(f"{stage_name}: unknown esptool failure")
+    raise last_error
+
+
 def _scan_esp_ports():
     from serial.tools import list_ports
-    ports = []
+    strict_ports = []
+    fallback_ports = []
     for p in list_ports.comports():
+        device = str(p.device or "")
         text = f"{p.manufacturer} {p.description}".lower()
-        if any(k.lower() in text for k in ESP32_KEYWORDS):
-            ports.append(p.device)
-    return ports
+        vid = getattr(p, "vid", None)
+        if any(k.lower() in text for k in ESP32_KEYWORDS) or vid == 0x303A:
+            if device:
+                strict_ports.append(device)
+            continue
+        if device.startswith("/dev/ttyACM") or device.startswith("/dev/ttyUSB"):
+            fallback_ports.append(device)
+
+    ordered = []
+    seen = set()
+    for dev in strict_ports + fallback_ports:
+        if dev not in seen:
+            seen.add(dev)
+            ordered.append(dev)
+    return ordered
 
 
 def _wait_for_port(preferred: str, log_func=None):
@@ -260,6 +403,134 @@ def wait_for_reset_signal(port: str, baudrate: int = BAUDRATE, chip: str = ESP_C
     if log_func:
         log_func("Reset not detected (timeout) — continuing.", "warning")
     return _wait_for_port(port, log_func=log_func)
+
+
+def generate_esp_image_from_elf(elf_path: Path, output_path: Path, chip: str = ESP_CHIP, log_func=None) -> Path:
+    """Generate ESP app image from ELF using esptool elf2image."""
+    elf_path = Path(elf_path)
+    output_path = Path(output_path)
+    if not elf_path.exists():
+        raise MicroPyError(f"ELF not found: {elf_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = _build_esptool_elf2image_cmd(elf_path, output_path, chip=chip)
+    _run_esptool(cmd, log_func=log_func)
+    if not output_path.exists():
+        raise MicroPyError(f"Failed to create image: {output_path}")
+    if log_func:
+        log_func(f"Generated image: {output_path}", "success")
+    return output_path
+
+
+def flash_triple_boot_firmware(
+    port: str,
+    bootloader_path: Path,
+    partition_table_path: Path,
+    otadata_path: Path,
+    micropython_path: Path,
+    cpp_path: Path,
+    rust_path: Path,
+    *,
+    bootloader_offset: str = "0x0",
+    partition_offset: str = "0x8000",
+    otadata_offset: str = "0xF000",
+    micropython_offset: str = "0x20000",
+    cpp_offset: str = "0x420000",
+    rust_offset: str = "0x820000",
+    baudrate: int = BAUDRATE,
+    chip: str = ESP_CHIP,
+    erase_before: bool = True,
+    run_after: bool = True,
+    log_func=None,
+) -> str:
+    """Full-chip triple-boot flash: boot assets + all app slots."""
+    images = {
+        "bootloader": Path(bootloader_path),
+        "partition_table": Path(partition_table_path),
+        "otadata": Path(otadata_path),
+        "micropython": Path(micropython_path),
+        "cpp": Path(cpp_path),
+        "rust": Path(rust_path),
+    }
+    for label, path in images.items():
+        if not path.exists():
+            raise MicroPyError(f"{label} image not found: {path}")
+
+    if log_func:
+        log_func("Using automatic USB reset mode (no manual BOOT/RESET needed).", "info")
+
+    if erase_before:
+        if log_func:
+            log_func("Erasing full flash…", "warning")
+        port = _run_esptool_with_connect_retries(
+            _build_esptool_erase_cmd,
+            port=port,
+            chip=chip,
+            baudrate=baudrate,
+            after=ESP_AFTER_ERASE,
+            stage_name="erase-flash",
+            log_func=log_func,
+        )
+
+    stages = [
+        (
+            "Flashing bootloader + partition table + ota data",
+            [
+                (bootloader_offset, images["bootloader"]),
+                (partition_offset, images["partition_table"]),
+                (otadata_offset, images["otadata"]),
+            ],
+        ),
+        (
+            "Flashing MicroPython (ota_0)",
+            [(micropython_offset, images["micropython"])],
+        ),
+        (
+            "Flashing C++ (ota_1)",
+            [(cpp_offset, images["cpp"])],
+        ),
+        (
+            "Flashing Rust (ota_2)",
+            [(rust_offset, images["rust"])],
+        ),
+    ]
+
+    for stage_name, pairs in stages:
+        if log_func:
+            log_func(stage_name, "info")
+        port = _run_esptool_with_connect_retries(
+            lambda port, baudrate, chip, before, after: _build_esptool_multi_write_cmd(
+                port,
+                pairs,
+                baudrate,
+                chip,
+                before=before,
+                after=after,
+            ),
+            port=port,
+            chip=chip,
+            baudrate=baudrate,
+            after=ESP_AFTER_FLASH,
+            stage_name=stage_name,
+            log_func=log_func,
+        )
+
+    if run_after:
+        if log_func:
+            log_func("Starting firmware after flash…", "info")
+        port = _run_esptool_with_connect_retries(
+            _build_esptool_run_cmd,
+            port=port,
+            chip=chip,
+            baudrate=baudrate,
+            after=ESP_AFTER_RUN,
+            stage_name="run",
+            log_func=log_func,
+            before_modes=("no-reset", ESP_BEFORE, "default-reset"),
+        )
+
+    if log_func:
+        log_func("Triple-boot flash complete ✓", "success")
+    return port
 
 
 def flash_firmware(port: str, firmware_path: Path = FIRMWARE_BIN, baudrate: int = BAUDRATE,
