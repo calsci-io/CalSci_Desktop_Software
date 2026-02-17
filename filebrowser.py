@@ -8,6 +8,15 @@ import threading
 import hashlib
 import re
 import time
+import subprocess
+import shutil
+import os
+import pty
+import fcntl
+import signal
+import struct
+import termios
+from html import escape
 from pathlib import Path
 from queue import Queue, Empty
 
@@ -19,7 +28,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QToolButton, QInputDialog, QDialog, QDialogButtonBox,
     QScrollBar, QToolBar, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, QSize, Signal, QRect
+from PySide6.QtCore import Qt, QTimer, QSize, Signal, QRect, QSocketNotifier, QProcess
 from PySide6.QtGui import (
     QColor, QFont, QAction, QTextCursor, QKeySequence, QShortcut,
     QPainter, QTextFormat, QPen, QBrush, QFontMetrics, QTextDocument,
@@ -581,6 +590,95 @@ class CodeEditor(QPlainTextEdit):
         # Autocomplete setup
         self._setup_completer()
 
+        # Custom undo/redo (character-wise)
+        self.setUndoRedoEnabled(False)
+        self._undo_stack = []
+        self._redo_stack = []
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self.document().contentsChange.connect(self._on_contents_change)
+
+        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.undo_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.undo_shortcut.activated.connect(self._custom_undo)
+        self.redo_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self.redo_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.redo_shortcut.activated.connect(self._custom_redo)
+        self.redo_shortcut2 = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.redo_shortcut2.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self.redo_shortcut2.activated.connect(self._custom_redo)
+
+    def setPlainText(self, text):
+        self._suppress_undo_record = True
+        super().setPlainText(text)
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+    def _on_contents_change(self, position, chars_removed, chars_added):
+        new_text = self.toPlainText()
+        if self._suppress_undo_record:
+            self._last_text = new_text
+            return
+
+        old_text = self._last_text
+        removed_text = old_text[position:position + chars_removed] if chars_removed else ""
+        added_text = new_text[position:position + chars_added] if chars_added else ""
+
+        if removed_text or added_text:
+            # Record removals first (per-character, same position),
+            # then additions (per-character, advancing position).
+            if removed_text:
+                for ch in removed_text:
+                    self._undo_stack.append((position, ch, ""))
+            if added_text:
+                for i, ch in enumerate(added_text):
+                    self._undo_stack.append((position + i, "", ch))
+            self._redo_stack.clear()
+
+        self._last_text = new_text
+
+    def _custom_undo(self):
+        if not self._undo_stack:
+            return
+
+        position, removed_text, added_text = self._undo_stack.pop()
+        self._suppress_undo_record = True
+
+        cursor = self.textCursor()
+        cursor.setPosition(position)
+        if added_text:
+            cursor.setPosition(position + len(added_text), QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        if removed_text:
+            cursor.insertText(removed_text)
+        self.setTextCursor(cursor)
+
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self._redo_stack.append((position, removed_text, added_text))
+
+    def _custom_redo(self):
+        if not self._redo_stack:
+            return
+
+        position, removed_text, added_text = self._redo_stack.pop()
+        self._suppress_undo_record = True
+
+        cursor = self.textCursor()
+        cursor.setPosition(position)
+        if removed_text:
+            cursor.setPosition(position + len(removed_text), QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        if added_text:
+            cursor.insertText(added_text)
+        self.setTextCursor(cursor)
+
+        self._suppress_undo_record = False
+        self._last_text = self.toPlainText()
+        self._undo_stack.append((position, removed_text, added_text))
+
     def line_number_area_width(self):
         digits = 1
         max_num = max(1, self.blockCount())
@@ -779,6 +877,12 @@ class CodeEditor(QPlainTextEdit):
 
     def keyPressEvent(self, event):
         """Handle key press for autocomplete with dot-completion support."""
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self._custom_undo()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self._custom_redo()
+            return
         # If completer popup is visible, let it handle certain keys
         if self.completer.popup().isVisible():
             if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return,
@@ -819,7 +923,6 @@ class CodeEditor(QPlainTextEdit):
         # Check if this is a dot key press
         is_dot = event.text() == '.'
 
-        # Default key handling
         super().keyPressEvent(event)
 
         # Handle dot-completion trigger
@@ -874,6 +977,230 @@ class CodeEditor(QPlainTextEdit):
                 self.completer.popup().hide()
         else:
             self.completer.popup().hide()
+
+
+class PtyTerminal(QPlainTextEdit):
+    """Lightweight PTY-backed terminal widget for interactive shell sessions."""
+
+    _ANSI_CSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+    _ANSI_OSC_RE = re.compile(r"\x1B\][^\x07]*(\x07|\x1B\\)")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.master_fd = None
+        self.proc = None
+        self.notifier = None
+
+        self.setReadOnly(True)
+        self.setUndoRedoEnabled(False)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def is_running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start_shell(self, cwd=None):
+        self.stop()
+        try:
+            master_fd, slave_fd = pty.openpty()
+            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            shell = os.environ.get("SHELL", "/bin/bash")
+            env = os.environ.copy()
+            env.setdefault("TERM", "xterm-256color")
+
+            self.proc = subprocess.Popen(
+                [shell, "-i"],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                preexec_fn=os.setsid,
+                close_fds=True,
+                cwd=cwd,
+                env=env,
+            )
+            os.close(slave_fd)
+            self.master_fd = master_fd
+
+            self.notifier = QSocketNotifier(self.master_fd, QSocketNotifier.Type.Read, self)
+            self.notifier.activated.connect(self._on_pty_readable)
+            self._update_window_size()
+            return True
+        except Exception as exc:
+            self._append_text(f"[terminal start error] {exc}\n")
+            self.stop()
+            return False
+
+    def run_command(self, command):
+        if not self.is_running():
+            if not self.start_shell():
+                return False
+        self.write_text(command + "\n")
+        return True
+
+    def write_text(self, text):
+        if self.master_fd is None:
+            return
+        try:
+            os.write(self.master_fd, text.encode("utf-8", "replace"))
+        except Exception:
+            pass
+
+    def _append_text(self, text):
+        if not text:
+            return
+        self.moveCursor(QTextCursor.MoveOperation.End)
+        self.insertPlainText(text)
+        sb = self.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _strip_ansi(self, text):
+        text = self._ANSI_OSC_RE.sub("", text)
+        text = self._ANSI_CSI_RE.sub("", text)
+        return text
+
+    def _on_pty_readable(self):
+        if self.master_fd is None:
+            return
+
+        chunks = []
+        while True:
+            try:
+                data = os.read(self.master_fd, 4096)
+            except BlockingIOError:
+                break
+            except OSError:
+                self.stop()
+                return
+            if not data:
+                self.stop()
+                return
+            chunks.append(data)
+
+        if not chunks:
+            return
+
+        text = b"".join(chunks).decode("utf-8", "replace")
+        text = text.replace("\r\n", "\n").replace("\r", "")
+        text = self._strip_ansi(text)
+        self._append_text(text)
+
+    def _update_window_size(self):
+        if self.master_fd is None:
+            return
+        fm = self.fontMetrics()
+        cw = max(fm.horizontalAdvance("M"), 1)
+        ch = max(fm.height(), 1)
+        cols = max(self.viewport().width() // cw, 20)
+        rows = max(self.viewport().height() // ch, 5)
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        try:
+            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        if not self.is_running():
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        mods = event.modifiers()
+
+        if event.matches(QKeySequence.StandardKey.Copy):
+            super().copy()
+            return
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.write_text(QApplication.clipboard().text())
+            return
+
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            if key == Qt.Key.Key_C:
+                self.write_text("\x03")
+                return
+            if key == Qt.Key.Key_D:
+                self.write_text("\x04")
+                return
+            if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+                ctrl = chr(key - Qt.Key.Key_A + 1)
+                self.write_text(ctrl)
+                return
+            if key == Qt.Key.Key_BracketRight:  # Ctrl+]
+                self.write_text("\x1d")
+                return
+
+        special = {
+            Qt.Key.Key_Return: "\r",
+            Qt.Key.Key_Enter: "\r",
+            Qt.Key.Key_Backspace: "\x7f",
+            Qt.Key.Key_Tab: "\t",
+            Qt.Key.Key_Escape: "\x1b",
+            Qt.Key.Key_Up: "\x1b[A",
+            Qt.Key.Key_Down: "\x1b[B",
+            Qt.Key.Key_Right: "\x1b[C",
+            Qt.Key.Key_Left: "\x1b[D",
+            Qt.Key.Key_Home: "\x1b[H",
+            Qt.Key.Key_End: "\x1b[F",
+            Qt.Key.Key_Delete: "\x1b[3~",
+            Qt.Key.Key_PageUp: "\x1b[5~",
+            Qt.Key.Key_PageDown: "\x1b[6~",
+        }
+        if key in special:
+            self.write_text(special[key])
+            return
+
+        text = event.text()
+        if text:
+            self.write_text(text)
+            return
+
+        super().keyPressEvent(event)
+
+    def stop(self):
+        if self.notifier is not None:
+            try:
+                self.notifier.activated.disconnect(self._on_pty_readable)
+            except Exception:
+                pass
+            self.notifier.setEnabled(False)
+            self.notifier.deleteLater()
+            self.notifier = None
+
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except Exception:
+                try:
+                    self.proc.terminate()
+                except Exception:
+                    pass
+            try:
+                self.proc.wait(timeout=0.8)
+            except Exception:
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
+            self.proc = None
+
+        if self.master_fd is not None:
+            try:
+                os.close(self.master_fd)
+            except Exception:
+                pass
+            self.master_fd = None
+
+    def closeEvent(self, event):
+        self.stop()
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_window_size()
 
 
 class FindReplaceDialog(QDialog):
@@ -1083,6 +1410,14 @@ class ESP32FileBrowser(QMainWindow):
 
         self.open_files = {}
         self.find_dialog = None
+        self._log_panel_sizes = None
+        self._log_collapsed = False
+        self.terminal_xterm_proc = None
+        self._terminal_stopping = False
+        self._terminal_start_mode = None
+        self._terminal_external = False
+        self._terminal_host_native_ready = False
+        self._normal_size = QSize(1200, 800)
 
         # Track the file that was last run with Save & Run
         # Used to detect when user switches to a different file
@@ -1090,7 +1425,8 @@ class ESP32FileBrowser(QMainWindow):
         self._needs_main_restore = False  # Flag to restore main.py on reconnect
 
         self.setWindowTitle("CalSci File Browser")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(self._normal_size)
+        self.resize(self._normal_size)
 
         self._build_ui()
         self._apply_stylesheet()
@@ -1112,6 +1448,9 @@ class ESP32FileBrowser(QMainWindow):
 
         self.file_tree.itemExpanded.connect(self._on_tree_item_expanded)
         self._scan_device()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
 
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
@@ -1256,8 +1595,8 @@ class ESP32FileBrowser(QMainWindow):
         right_layout.setSpacing(0)
 
         # Splitter for editor and log panel
-        editor_splitter = QSplitter(Qt.Orientation.Vertical)
-        editor_splitter.setObjectName("editorSplitter")
+        self.editor_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.editor_splitter.setObjectName("editorSplitter")
 
         # Tab widget for open files
         self.tab_widget = QTabWidget()
@@ -1267,7 +1606,7 @@ class ESP32FileBrowser(QMainWindow):
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.tabCloseRequested.connect(self._close_tab)
         # Note: currentChanged signal connected after all widgets are created (see below)
-        editor_splitter.addWidget(self.tab_widget)
+        self.editor_splitter.addWidget(self.tab_widget)
 
         # Log panel (collapsible)
         self.log_panel = QFrame()
@@ -1277,9 +1616,9 @@ class ESP32FileBrowser(QMainWindow):
         log_layout.setSpacing(0)
 
         # Log header with title and buttons
-        log_header = QFrame()
-        log_header.setObjectName("logHeader")
-        log_header_layout = QHBoxLayout(log_header)
+        self.log_header = QFrame()
+        self.log_header.setObjectName("logHeader")
+        log_header_layout = QHBoxLayout(self.log_header)
         log_header_layout.setContentsMargins(12, 4, 8, 4)
 
         log_title = QLabel("OUTPUT")
@@ -1288,9 +1627,16 @@ class ESP32FileBrowser(QMainWindow):
 
         log_header_layout.addStretch()
 
+        self.open_mpremote_btn = QToolButton()
+        self.open_mpremote_btn.setText("⌨")
+        self.open_mpremote_btn.setToolTip("Open mpremote REPL in Terminal")
+        self.open_mpremote_btn.setObjectName("toolBtn")
+        self.open_mpremote_btn.clicked.connect(self._start_terminal_mpremote)
+        log_header_layout.addWidget(self.open_mpremote_btn)
+
         self.clear_log_btn = QToolButton()
         self.clear_log_btn.setText("🗑")
-        self.clear_log_btn.setToolTip("Clear Log")
+        self.clear_log_btn.setToolTip("Clear Current Tab")
         self.clear_log_btn.setObjectName("toolBtn")
         self.clear_log_btn.clicked.connect(self._clear_log)
         log_header_layout.addWidget(self.clear_log_btn)
@@ -1302,19 +1648,70 @@ class ESP32FileBrowser(QMainWindow):
         self.toggle_log_btn.clicked.connect(self._toggle_log_panel)
         log_header_layout.addWidget(self.toggle_log_btn)
 
-        log_layout.addWidget(log_header)
+        log_layout.addWidget(self.log_header)
 
-        # Log text area
-        self.log_output = QPlainTextEdit()
+        # Output tabs: Log + Terminal
+        self.output_tabs = QTabWidget()
+        self.output_tabs.setObjectName("outputTabs")
+        self.output_tabs.setDocumentMode(True)
+
+        # Log tab
+        self.log_output = QTextEdit()
         self.log_output.setObjectName("logOutput")
         self.log_output.setReadOnly(True)
-        self.log_output.setMaximumBlockCount(1000)  # Limit log lines
-        log_layout.addWidget(self.log_output)
+        self.log_output.document().setMaximumBlockCount(1000)
+        self.output_tabs.addTab(self.log_output, "Log")
 
-        editor_splitter.addWidget(self.log_panel)
-        editor_splitter.setSizes([600, 200])  # Editor gets more space initially
+        # Terminal tab
+        self.terminal_tab = QWidget()
+        terminal_layout = QVBoxLayout(self.terminal_tab)
+        terminal_layout.setContentsMargins(0, 0, 0, 0)
+        terminal_layout.setSpacing(0)
 
-        right_layout.addWidget(editor_splitter)
+        terminal_toolbar = QFrame()
+        terminal_toolbar.setObjectName("terminalToolbar")
+        terminal_toolbar_layout = QHBoxLayout(terminal_toolbar)
+        terminal_toolbar_layout.setContentsMargins(8, 6, 8, 6)
+        terminal_toolbar_layout.setSpacing(8)
+
+        self.terminal_shell_btn = QPushButton("Shell")
+        self.terminal_shell_btn.setObjectName("terminalBtn")
+        self.terminal_shell_btn.setToolTip("Start normal shell")
+        self.terminal_shell_btn.clicked.connect(self._start_terminal_shell)
+        terminal_toolbar_layout.addWidget(self.terminal_shell_btn)
+
+        self.terminal_mpremote_btn = QPushButton("mpremote REPL")
+        self.terminal_mpremote_btn.setObjectName("terminalBtn")
+        self.terminal_mpremote_btn.setToolTip("Start interactive mpremote REPL")
+        self.terminal_mpremote_btn.clicked.connect(self._start_terminal_mpremote)
+        terminal_toolbar_layout.addWidget(self.terminal_mpremote_btn)
+
+        self.terminal_stop_btn = QPushButton("Stop")
+        self.terminal_stop_btn.setObjectName("terminalBtn")
+        self.terminal_stop_btn.clicked.connect(self._stop_terminal_process)
+        self.terminal_stop_btn.setEnabled(False)
+        terminal_toolbar_layout.addWidget(self.terminal_stop_btn)
+
+        terminal_toolbar_layout.addStretch()
+
+        self.terminal_status_label = QLabel("Terminal idle")
+        self.terminal_status_label.setObjectName("terminalStatusLabel")
+        terminal_toolbar_layout.addWidget(self.terminal_status_label)
+        terminal_layout.addWidget(terminal_toolbar)
+
+        self.terminal_host = QFrame()
+        self.terminal_host.setObjectName("terminalHost")
+        self.terminal_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        terminal_layout.addWidget(self.terminal_host)
+
+        self.output_tabs.addTab(self.terminal_tab, "Terminal")
+        self.output_tabs.currentChanged.connect(self._on_output_tab_changed)
+        log_layout.addWidget(self.output_tabs)
+
+        self.editor_splitter.addWidget(self.log_panel)
+        self.editor_splitter.setSizes([600, 200])  # Editor gets more space initially
+
+        right_layout.addWidget(self.editor_splitter)
 
         # Welcome tab when no file is open
         self.welcome_widget = QWidget()
@@ -1407,11 +1804,18 @@ class ESP32FileBrowser(QMainWindow):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1e1e1e;
+                color: #d0d0d0;
+                font-family: 'Fira Sans', 'Noto Sans', 'DejaVu Sans', sans-serif;
+                font-size: 12px;
+            }
+            QWidget {
+                color: #d0d0d0;
+                font-family: 'Fira Sans', 'Noto Sans', 'DejaVu Sans', sans-serif;
             }
 
             QFrame#header {
-                background-color: #141414;
-                border-bottom: 1px solid #333;
+                background-color: #151515;
+                border-bottom: 1px solid #2b2b2b;
             }
 
             QLabel#deviceLabel {
@@ -1421,7 +1825,7 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QLabel#pathLabel {
-                color: #888;
+                color: #a0a0a0;
                 font-size: 11px;
             }
 
@@ -1430,8 +1834,8 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QFrame#explorerHeader {
-                background-color: #1a1a1a;
-                border-bottom: 1px solid #333;
+                background-color: #161616;
+                border-bottom: 1px solid #262626;
             }
 
             QLabel#sectionLabel {
@@ -1443,18 +1847,19 @@ class ESP32FileBrowser(QMainWindow):
 
             QToolButton#toolBtn {
                 background-color: transparent;
-                color: #888;
-                border: none;
-                border-radius: 3px;
+                color: #9a9a9a;
+                border: 1px solid transparent;
+                border-radius: 4px;
                 padding: 4px 6px;
                 font-size: 12px;
             }
             QToolButton#toolBtn:hover {
-                background-color: rgba(233, 84, 32, 0.3);
+                background-color: #262626;
+                border-color: #303030;
                 color: #e95420;
             }
             QToolButton#toolBtn:pressed {
-                background-color: rgba(233, 84, 32, 0.5);
+                background-color: rgba(233, 84, 32, 0.35);
             }
 
             QFrame#searchFrame {
@@ -1463,12 +1868,13 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QLineEdit#searchInput {
-                background-color: #2a2a2a;
-                color: #cccccc;
-                border: 1px solid #3a3a3a;
+                background-color: #252525;
+                color: #d0d0d0;
+                border: 1px solid #303030;
                 border-radius: 4px;
-                padding: 6px 8px;
+                padding: 6px 10px;
                 font-size: 12px;
+                selection-background-color: rgba(233, 84, 32, 0.35);
             }
             QLineEdit#searchInput:focus {
                 border-color: #e95420;
@@ -1479,20 +1885,22 @@ class ESP32FileBrowser(QMainWindow):
 
             QTreeWidget#fileTree {
                 background-color: #1e1e1e;
-                color: #cccccc;
+                color: #cfcfcf;
                 border: none;
                 font-size: 13px;
                 outline: none;
             }
             QTreeWidget#fileTree::item {
-                padding: 4px 0px;
+                padding: 4px 6px;
+                border-radius: 3px;
             }
             QTreeWidget#fileTree::item:hover {
-                background-color: #2a2a2a;
+                background-color: #242424;
             }
             QTreeWidget#fileTree::item:selected {
-                background-color: rgba(233, 84, 32, 0.3);
+                background-color: #2b2b2b;
                 color: #ffffff;
+                border-left: 2px solid #e95420;
             }
             QTreeWidget#fileTree::branch:has-children:!has-siblings:closed,
             QTreeWidget#fileTree::branch:closed:has-children:has-siblings {
@@ -1517,21 +1925,23 @@ class ESP32FileBrowser(QMainWindow):
                 background-color: #141414;
             }
             QTabWidget#editorTabs QTabBar::tab {
-                background-color: #1a1a1a;
-                color: #888;
-                padding: 8px 20px;
+                background-color: #1b1b1b;
+                color: #9a9a9a;
+                padding: 7px 16px;
                 border: none;
-                border-right: 1px solid #141414;
+                border-right: 1px solid #131313;
+                border-top: 2px solid transparent;
                 font-size: 12px;
                 min-width: 80px;
             }
             QTabWidget#editorTabs QTabBar::tab:selected {
                 background-color: #1e1e1e;
-                color: #ffffff;
+                color: #f0f0f0;
                 border-top: 2px solid #e95420;
             }
             QTabWidget#editorTabs QTabBar::tab:hover:!selected {
-                background-color: #252525;
+                background-color: #242424;
+                color: #d0d0d0;
             }
             QTabWidget#editorTabs QTabBar::close-button {
                 image: none;
@@ -1545,9 +1955,9 @@ class ESP32FileBrowser(QMainWindow):
                 background-color: #1e1e1e;
                 color: #d4d4d4;
                 border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
+                font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
                 font-size: 13px;
-                selection-background-color: rgba(233, 84, 32, 0.4);
+                selection-background-color: rgba(233, 84, 32, 0.35);
             }
 
             QLabel#welcomeTitle {
@@ -1568,12 +1978,12 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QFrame#actionBar {
-                background-color: #141414;
-                border-top: 1px solid #333;
+                background-color: #151515;
+                border-top: 1px solid #262626;
             }
 
             QLabel#statusLabel {
-                color: #888;
+                color: #9a9a9a;
                 font-size: 11px;
             }
 
@@ -1646,13 +2056,13 @@ class ESP32FileBrowser(QMainWindow):
 
             QScrollBar:vertical {
                 background-color: #1e1e1e;
-                width: 12px;
+                width: 10px;
                 margin: 0;
             }
             QScrollBar::handle:vertical {
                 background-color: #3a3a3a;
                 min-height: 30px;
-                border-radius: 6px;
+                border-radius: 5px;
                 margin: 2px;
             }
             QScrollBar::handle:vertical:hover {
@@ -1667,13 +2077,13 @@ class ESP32FileBrowser(QMainWindow):
 
             QScrollBar:horizontal {
                 background-color: #1e1e1e;
-                height: 12px;
+                height: 10px;
                 margin: 0;
             }
             QScrollBar::handle:horizontal {
                 background-color: #3a3a3a;
                 min-width: 30px;
-                border-radius: 6px;
+                border-radius: 5px;
                 margin: 2px;
             }
             QScrollBar::handle:horizontal:hover {
@@ -1719,22 +2129,78 @@ class ESP32FileBrowser(QMainWindow):
             }
 
             QFrame#logPanel {
-                background-color: #1a1a1a;
-                border-top: 1px solid #333;
+                background-color: #171717;
+                border-top: 1px solid #262626;
             }
 
             QFrame#logHeader {
-                background-color: #141414;
-                border-bottom: 1px solid #2a2a2a;
+                background-color: #151515;
+                border-bottom: 1px solid #262626;
             }
 
-            QPlainTextEdit#logOutput {
-                background-color: #0d0d0d;
+            QTabWidget#outputTabs::pane {
+                border: none;
+                background-color: #101010;
+            }
+            QTabWidget#outputTabs QTabBar {
+                background-color: #151515;
+            }
+            QTabWidget#outputTabs QTabBar::tab {
+                background-color: #1b1b1b;
+                color: #a0a0a0;
+                padding: 5px 14px;
+                border: none;
+                border-right: 1px solid #141414;
+                border-top: 2px solid transparent;
+                font-size: 11px;
+            }
+            QTabWidget#outputTabs QTabBar::tab:selected {
+                background-color: #101010;
+                color: #f0f0f0;
+                border-top: 2px solid #e95420;
+            }
+            QTabWidget#outputTabs QTabBar::tab:hover:!selected {
+                background-color: #242424;
+                color: #d0d0d0;
+            }
+
+            QTextEdit#logOutput {
+                background-color: #101010;
                 color: #d4d4d4;
                 border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
+                font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
                 font-size: 12px;
                 padding: 8px;
+            }
+            QFrame#terminalToolbar {
+                background-color: #101010;
+                border-bottom: 1px solid #262626;
+            }
+            QLabel#terminalStatusLabel {
+                color: #9a9a9a;
+                font-size: 11px;
+            }
+            QFrame#terminalHost {
+                background-color: #101010;
+                border: none;
+            }
+            QPushButton#terminalBtn {
+                background-color: rgba(233, 84, 32, 0.5);
+                color: #ffffff;
+                border: 1px solid rgba(233, 84, 32, 0.8);
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 62px;
+            }
+            QPushButton#terminalBtn:hover {
+                background-color: rgba(233, 84, 32, 0.7);
+            }
+            QPushButton#terminalBtn:disabled {
+                background-color: rgba(85, 85, 85, 0.3);
+                color: #555;
+                border-color: rgba(85, 85, 85, 0.5);
             }
 
             QMessageBox {
@@ -2179,7 +2645,10 @@ class ESP32FileBrowser(QMainWindow):
 
         # If opening a different file than the last run file, note that system will reset
         if self._last_run_file and self._last_run_file != path:
-            self.bridge.run_log_signal.emit(f"ℹ️ Opening new file. Previous run ({self._last_run_file.split('/')[-1]}) will be reset on next Save & Run.", "info")
+            self.bridge.run_log_signal.emit(
+                f"ℹ️ Opening new file. Previous run ({self._last_run_file.split('/')[-1]}) will be reset on next Save & Run.",
+                "info"
+            )
 
         if path in self.open_files:
             for i in range(self.tab_widget.count()):
@@ -2266,14 +2735,20 @@ class ESP32FileBrowser(QMainWindow):
 
         if current_path and current_path in self.open_files:
             is_modified = self.open_files[current_path]["modified"]
+            self.save_upload_btn.setText("💾 Save & Upload")
+            self.save_upload_btn.setToolTip("Save and upload to CalSci")
             self.save_upload_btn.setEnabled(is_modified)
-            self.revert_btn.setEnabled(is_modified)
             # Save & Run enabled whenever a file is open
             self.save_run_btn.setEnabled(True)
+            self.save_run_btn.setToolTip("Save and run on CalSci")
+            self.revert_btn.setEnabled(is_modified)
         else:
             self.save_upload_btn.setEnabled(False)
             self.revert_btn.setEnabled(False)
             self.save_run_btn.setEnabled(False)
+            self.save_upload_btn.setText("💾 Save & Upload")
+            self.save_upload_btn.setToolTip("")
+            self.save_run_btn.setToolTip("")
 
     def _update_status(self, path=None):
         if not path:
@@ -2519,26 +2994,272 @@ class ESP32FileBrowser(QMainWindow):
         color = color_map.get(msg_type, "#d4d4d4")
 
         # Append to log with color
-        self.log_output.appendHtml(f'<span style="color: {color};">{message}</span>')
+        safe_msg = escape(message).replace("\n", "<br>")
+        self.log_output.append(f'<span style="color: {color};">{safe_msg}</span>')
 
         # Auto-scroll to bottom
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _set_terminal_status(self, message):
+        """Update terminal status in both output panel and status bar."""
+        self.terminal_status_label.setText(message)
+        self.status_bar.showMessage(message)
+
+    def _set_terminal_running_ui(self, running):
+        """Toggle terminal control buttons based on process state."""
+        self.terminal_stop_btn.setEnabled(running)
+        self.terminal_shell_btn.setEnabled(not running)
+        self.terminal_mpremote_btn.setEnabled(not running)
+
+    def _is_terminal_running(self):
+        """Return True when embedded xterm process is active."""
+        return (
+            self.terminal_xterm_proc is not None
+            and self.terminal_xterm_proc.state() != QProcess.ProcessState.NotRunning
+        )
+
+    def _start_terminal_shell(self):
+        """Start an embedded login shell in the terminal tab."""
+        self._start_embedded_terminal(mode="shell")
+
+    def _start_terminal_mpremote(self):
+        """Start embedded mpremote REPL for the selected serial port."""
+        self._start_embedded_terminal(mode="mpremote")
+
+    def _start_external_terminal(self, mode="shell", xterm_path=None):
+        """Launch xterm as a separate native window (Wayland-safe fallback)."""
+        if xterm_path is None:
+            xterm_path = shutil.which("xterm")
+        if not xterm_path:
+            self._set_terminal_status("xterm is not installed on this system")
+            return False
+
+        if self._is_terminal_running():
+            self._stop_terminal_process(quiet=True)
+
+        if mode == "mpremote" and self.flasher:
+            try:
+                self.flasher.close()
+            except Exception:
+                pass
+            self.flasher = None
+
+        shell = os.environ.get("SHELL", "/bin/bash")
+        args = [
+            "-fa", "Monospace",
+            "-fs", "11",
+            "-bg", "#101010",
+            "-fg", "#d4d4d4",
+            "-bc",
+            "-sb",
+            "-sl", "5000",
+        ]
+
+        if mode == "mpremote":
+            mpremote_cmd = f"mpremote connect {self.port} repl; exec {shell} -i"
+            args.extend(["-e", shell, "-lc", mpremote_cmd])
+            start_message = f"mpremote REPL opened in external terminal on {self.port}"
+        else:
+            args.extend(["-e", shell, "-i"])
+            start_message = "Shell opened in external terminal"
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        proc.finished.connect(self._on_terminal_process_finished)
+        proc.errorOccurred.connect(self._on_terminal_process_error)
+        self.terminal_xterm_proc = proc
+        self._terminal_external = True
+        self._terminal_stopping = False
+
+        self._set_terminal_status("Starting external terminal...")
+        proc.start(xterm_path, args)
+        if not proc.waitForStarted(2500):
+            err = proc.errorString() or "unknown error"
+            self.terminal_xterm_proc = None
+            self._terminal_external = False
+            self._set_terminal_running_ui(False)
+            self._set_terminal_status(f"Terminal start failed: {err}")
+            return False
+
+        self._set_terminal_running_ui(True)
+        self._set_terminal_status(start_message)
+        return True
+
+    def _start_embedded_terminal(self, mode="shell"):
+        """Launch a real xterm embedded inside the terminal host widget."""
+        self._terminal_start_mode = mode
+        self.output_tabs.setCurrentWidget(self.terminal_tab)
+
+        try:
+            # Embedded xterm via -into is unstable on Qt Wayland and can cause flicker/ghosting.
+            session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+            qt_platform = os.environ.get("QT_QPA_PLATFORM", "").lower()
+            if session_type == "wayland" and qt_platform != "xcb":
+                return self._start_external_terminal(mode=mode)
+
+            xterm_path = shutil.which("xterm")
+            if not xterm_path:
+                self._set_terminal_status("xterm is not installed on this system")
+                return False
+
+            if self._is_terminal_running():
+                self._stop_terminal_process(quiet=True)
+
+            if mode == "mpremote" and self.flasher:
+                try:
+                    self.flasher.close()
+                except Exception:
+                    pass
+                self.flasher = None
+
+            if not self._terminal_host_native_ready:
+                self.terminal_host.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+                self.terminal_host.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+                self._terminal_host_native_ready = True
+
+            self.terminal_host.show()
+            self.terminal_host.update()
+            host_win_id = int(self.terminal_host.winId())
+            if host_win_id == 0:
+                self._set_terminal_status("Terminal host window is not ready")
+                return False
+
+            shell = os.environ.get("SHELL", "/bin/bash")
+            args = [
+                "-into", str(host_win_id),
+                "-fa", "Monospace",
+                "-fs", "11",
+                "-bg", "#101010",
+                "-fg", "#d4d4d4",
+                "-bc",
+                "-sb",
+                "-sl", "5000",
+            ]
+
+            if mode == "mpremote":
+                mpremote_cmd = f"mpremote connect {self.port} repl; exec {shell} -i"
+                args.extend(["-e", shell, "-lc", mpremote_cmd])
+                start_message = f"mpremote REPL started on {self.port}"
+            else:
+                args.extend(["-e", shell, "-i"])
+                start_message = "Shell started"
+
+            proc = QProcess(self)
+            proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            proc.finished.connect(self._on_terminal_process_finished)
+            proc.errorOccurred.connect(self._on_terminal_process_error)
+            self.terminal_xterm_proc = proc
+            self._terminal_external = False
+            self._terminal_stopping = False
+
+            self._set_terminal_status("Starting terminal...")
+            proc.start(xterm_path, args)
+            if not proc.waitForStarted(2500):
+                err = proc.errorString() or "unknown error"
+                self.terminal_xterm_proc = None
+                self._set_terminal_running_ui(False)
+                hint = ""
+                if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+                    hint = " (try running app with QT_QPA_PLATFORM=xcb)"
+                self._set_terminal_status(f"Terminal start failed: {err}{hint}")
+                return False
+
+            self._set_terminal_running_ui(True)
+            self._set_terminal_status(start_message)
+            return True
+        finally:
+            self._terminal_start_mode = None
+
+    def _on_output_tab_changed(self, index):
+        """Keep terminal explicit; do not auto-start on tab switch."""
+        if self.output_tabs.widget(index) == self.terminal_tab:
+            if not self._is_terminal_running() and self._terminal_start_mode is None:
+                self._set_terminal_status("Terminal idle. Click Shell or mpremote REPL to start.")
+
+    def _stop_terminal_process(self, quiet=False):
+        """Stop current terminal process."""
+        if not self._is_terminal_running():
+            if not quiet:
+                self._set_terminal_status("Terminal is not running")
+            return
+
+        proc = self.terminal_xterm_proc
+        self._terminal_stopping = True
+        proc.terminate()
+        if not proc.waitForFinished(1500):
+            proc.kill()
+            proc.waitForFinished(1000)
+
+        self.terminal_xterm_proc = None
+        self._terminal_external = False
+        self._set_terminal_running_ui(False)
+        self._terminal_stopping = False
+        if not quiet:
+            self._set_terminal_status("Terminal stopped")
+
+    def _on_terminal_process_finished(self, exit_code, exit_status):
+        """Handle embedded xterm exit."""
+        was_stopping = self._terminal_stopping
+        self._terminal_stopping = False
+        self.terminal_xterm_proc = None
+        self._terminal_external = False
+        self._set_terminal_running_ui(False)
+        if was_stopping:
+            return
+
+        if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
+            self._set_terminal_status("Terminal exited")
+        else:
+            self._set_terminal_status(f"Terminal exited with code {exit_code}")
+
+    def _on_terminal_process_error(self, process_error):
+        """Handle embedded xterm process errors."""
+        if self._terminal_stopping:
+            return
+        name = getattr(process_error, "name", str(process_error))
+        self._set_terminal_status(f"Terminal error: {name}")
+
     def _clear_log(self):
-        """Clear the log output panel."""
+        """Clear active output tab (log or terminal)."""
+        if self.output_tabs.currentWidget() == self.terminal_tab:
+            self._stop_terminal_process(quiet=True)
+            self._start_terminal_shell()
+            return
         self.log_output.clear()
+        self._set_terminal_status("Log cleared")
 
     def _toggle_log_panel(self):
         """Toggle log panel visibility."""
-        if self.log_output.isVisible():
-            self.log_output.hide()
+        if self.output_tabs.isVisible():
+            # Collapse to header-only (VS Code style)
+            self._log_panel_sizes = self.editor_splitter.sizes()
+            self.output_tabs.hide()
             self.toggle_log_btn.setText("▲")
             self.toggle_log_btn.setToolTip("Show Log Panel")
+
+            header_h = self.log_header.sizeHint().height()
+            collapsed_h = max(header_h + 6, 24)
+            self.log_panel.setMinimumHeight(collapsed_h)
+            self.log_panel.setMaximumHeight(collapsed_h)
+
+            if self._log_panel_sizes and len(self._log_panel_sizes) == 2:
+                total = sum(self._log_panel_sizes)
+                self.editor_splitter.setSizes([max(total - collapsed_h, 1), collapsed_h])
+            self._log_collapsed = True
         else:
-            self.log_output.show()
+            # Expand to previous size
+            self.log_panel.setMinimumHeight(0)
+            self.log_panel.setMaximumHeight(16777215)
+            self.output_tabs.show()
             self.toggle_log_btn.setText("▼")
             self.toggle_log_btn.setToolTip("Hide Log Panel")
+
+            if self._log_panel_sizes and len(self._log_panel_sizes) == 2:
+                self.editor_splitter.setSizes(self._log_panel_sizes)
+            else:
+                self.editor_splitter.setSizes([600, 200])
+            self._log_collapsed = False
 
     def _on_run_complete(self, path, success, output):
         """Handle run completion."""
@@ -2934,5 +3655,8 @@ class ESP32FileBrowser(QMainWindow):
             except:
                 pass
             self.flasher = None
+
+        # Stop embedded terminal process
+        self._stop_terminal_process(quiet=True)
 
         event.accept()

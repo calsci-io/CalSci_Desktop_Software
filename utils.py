@@ -54,12 +54,26 @@ class SelectionMemory:
 
 def find_esp32_ports():
     """Detect connected ESP32 devices."""
-    ports = []
+    strict_ports = []
+    fallback_ports = []
     for p in list_ports.comports():
+        device = str(p.device or "")
         text = f"{p.manufacturer} {p.description}".lower()
-        if any(k.lower() in text for k in ESP32_KEYWORDS):
-            ports.append(p.device)
-    return ports
+        vid = getattr(p, "vid", None)
+        if any(k.lower() in text for k in ESP32_KEYWORDS) or vid == 0x303A:
+            if device:
+                strict_ports.append(device)
+            continue
+        if device.startswith("/dev/ttyACM") or device.startswith("/dev/ttyUSB"):
+            fallback_ports.append(device)
+
+    ordered = []
+    seen = set()
+    for dev in strict_ports + fallback_ports:
+        if dev not in seen:
+            seen.add(dev)
+            ordered.append(dev)
+    return ordered
 
 
 # ================= GIT HELPERS =================

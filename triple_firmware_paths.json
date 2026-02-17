@@ -1,0 +1,5 @@
+{
+  "mpy": "/home/sobik/CalSci_Desktop_Software/triple_boot_images/micropython.bin",
+  "cpp": "/home/sobik/dino_cpp_firmware/build/dino_cpp_ota.bin",
+  "rust": "/home/sobik/CalSci_Desktop_Software/triple_boot_images/rust_app.bin"
+}
