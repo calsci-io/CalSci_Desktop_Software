@@ -27,6 +27,7 @@ from config import (
     ROOT,
     FIRMWARE_BIN,
     SYNC_SOURCES_FILE,
+    TRIPLE_FIRMWARE_PATHS_FILE,
     TRIPLE_BOOTLOADER_OFFSET,
     TRIPLE_PARTITION_TABLE_OFFSET,
     TRIPLE_OTADATA_OFFSET,
@@ -96,10 +97,13 @@ class CalSciApp(QMainWindow):
         self._sync_action_add = "__sync_action_add__"
         self._sync_action_remove = "__sync_action_remove__"
         self._sync_action_separator = "__sync_action_separator__"
+        self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
+        self._triple_fw_key_by_index = {}
         
         self._build_ui()
         self._apply_stylesheet()
         self._load_sync_sources()
+        self._load_triple_firmware_paths()
 
         self.device_timer = QTimer()
         self.device_timer.timeout.connect(self._check_device_status)
@@ -163,10 +167,22 @@ class CalSciApp(QMainWindow):
         self.flash_btn.clicked.connect(self._handle_flash)
         left_layout.addWidget(self.flash_btn)
 
+        triple_row = QWidget()
+        triple_row_layout = QHBoxLayout(triple_row)
+        triple_row_layout.setContentsMargins(0, 0, 0, 0)
+        triple_row_layout.setSpacing(8)
+
         self.flash_triple_btn = QPushButton("Flash Triple Boot")
-        self.flash_triple_btn.setObjectName("btnSecondary")
+        self.flash_triple_btn.setObjectName("btnSecondaryCompact")
         self.flash_triple_btn.clicked.connect(self._handle_flash_tripleboot)
-        left_layout.addWidget(self.flash_triple_btn)
+        triple_row_layout.addWidget(self.flash_triple_btn, 1)
+
+        self.triple_fw_combo = QComboBox()
+        self.triple_fw_combo.setObjectName("syncSourceCombo")
+        self.triple_fw_combo.activated.connect(self._on_triple_firmware_option_activated)
+        triple_row_layout.addWidget(self.triple_fw_combo, 1)
+
+        left_layout.addWidget(triple_row)
 
         self.flash_fw_cb = QCheckBox("Reflash firmware before upload")
         self.flash_fw_cb.setChecked(False)
@@ -646,6 +662,104 @@ class CalSciApp(QMainWindow):
             return None
         return root
 
+    def _normalize_firmware_path(self, path_str):
+        return str(Path(path_str).expanduser().resolve())
+
+    def _triple_firmware_option_text(self, key):
+        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        current = self._triple_fw_paths.get(key, "")
+        if not current:
+            return f"{names[key]}: auto"
+        path = Path(current)
+        suffix = path.name
+        if not path.exists():
+            suffix = f"{suffix} (missing)"
+        return f"{names[key]}: {suffix}"
+
+    def _save_triple_firmware_paths(self):
+        payload = {k: self._triple_fw_paths.get(k, "") for k in ("mpy", "cpp", "rust")}
+        try:
+            TRIPLE_FIRMWARE_PATHS_FILE.write_text(
+                json.dumps(payload, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            self._log(f"Failed to save triple firmware paths: {e}", "warning")
+
+    def _refresh_triple_firmware_combo(self):
+        self.triple_fw_combo.blockSignals(True)
+        self.triple_fw_combo.clear()
+        self._triple_fw_key_by_index = {}
+
+        for idx, key in enumerate(("mpy", "cpp", "rust")):
+            self.triple_fw_combo.addItem(self._triple_firmware_option_text(key), key)
+            self._triple_fw_key_by_index[idx] = key
+
+        tooltip_lines = []
+        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        for key in ("mpy", "cpp", "rust"):
+            value = self._triple_fw_paths.get(key, "")
+            if value:
+                tooltip_lines.append(f"{names[key]}: {value}")
+            else:
+                tooltip_lines.append(f"{names[key]}: auto")
+        self.triple_fw_combo.setToolTip("\n".join(tooltip_lines))
+        self.triple_fw_combo.blockSignals(False)
+
+    def _load_triple_firmware_paths(self):
+        loaded = {"mpy": "", "cpp": "", "rust": ""}
+        if TRIPLE_FIRMWARE_PATHS_FILE.exists():
+            try:
+                raw = json.loads(TRIPLE_FIRMWARE_PATHS_FILE.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for key in loaded:
+                        value = raw.get(key, "")
+                        if isinstance(value, str) and value.strip():
+                            try:
+                                loaded[key] = self._normalize_firmware_path(value)
+                            except Exception:
+                                loaded[key] = value
+            except Exception:
+                pass
+        self._triple_fw_paths = loaded
+        self._refresh_triple_firmware_combo()
+        self._save_triple_firmware_paths()
+
+    def _on_triple_firmware_option_activated(self, index):
+        key = self._triple_fw_key_by_index.get(index)
+        if key not in {"mpy", "cpp", "rust"}:
+            return
+
+        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        filters = {
+            "mpy": "Firmware files (*.bin);;All files (*)",
+            "cpp": "Firmware files (*.bin);;All files (*)",
+            "rust": "Firmware files (*.bin *.elf);;All files (*)",
+        }
+
+        current = self._triple_fw_paths.get(key, "")
+        if current:
+            start = Path(current)
+            start_dir = str(start.parent if start.exists() else start.parent)
+        else:
+            start_dir = str(TRIPLE_ARTIFACTS_DIR)
+
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Select {names[key]} Firmware",
+            start_dir,
+            filters[key],
+        )
+        if not selected:
+            self._refresh_triple_firmware_combo()
+            return
+
+        normalized = self._normalize_firmware_path(selected)
+        self._triple_fw_paths[key] = normalized
+        self._save_triple_firmware_paths()
+        self._refresh_triple_firmware_combo()
+        self._log(f"Custom {names[key]} firmware path set: {normalized}", "success")
+
     def _resolve_candidate_path(self, label, candidates, log_found=True):
         checked = []
         for candidate in candidates:
@@ -727,16 +841,45 @@ class CalSciApp(QMainWindow):
             TRIPLE_PARTITION_TABLE_CANDIDATES,
         )
         otadata = self._resolve_candidate_path("OTA data image", TRIPLE_OTADATA_CANDIDATES)
-        micropython = self._resolve_candidate_path("MicroPython image", TRIPLE_MPY_CANDIDATES)
-        cpp = self._resolve_candidate_path("C++ image", TRIPLE_CPP_CANDIDATES)
+        custom_mpy = self._triple_fw_paths.get("mpy", "").strip()
+        custom_cpp = self._triple_fw_paths.get("cpp", "").strip()
+        custom_rust = self._triple_fw_paths.get("rust", "").strip()
 
-        try:
-            rust_bin = self._resolve_candidate_path("Rust image", TRIPLE_RUST_BIN_CANDIDATES)
-        except MicroPyError:
-            rust_elf = self._resolve_candidate_path("Rust ELF", TRIPLE_RUST_ELF_CANDIDATES)
-            self._log("Rust BIN not found. Generating from ELF…", "warning")
-            rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
-            generate_esp_image_from_elf(rust_elf, rust_bin, log_func=self._log)
+        if custom_mpy:
+            micropython = Path(custom_mpy)
+            if not micropython.exists():
+                raise MicroPyError(f"Custom MicroPython image not found: {micropython}")
+            self._log(f"MicroPython image (custom): {micropython}", "info")
+        else:
+            micropython = self._resolve_candidate_path("MicroPython image", TRIPLE_MPY_CANDIDATES)
+
+        if custom_cpp:
+            cpp = Path(custom_cpp)
+            if not cpp.exists():
+                raise MicroPyError(f"Custom C++ image not found: {cpp}")
+            self._log(f"C++ image (custom): {cpp}", "info")
+        else:
+            cpp = self._resolve_candidate_path("C++ image", TRIPLE_CPP_CANDIDATES)
+
+        if custom_rust:
+            rust_custom_path = Path(custom_rust)
+            if not rust_custom_path.exists():
+                raise MicroPyError(f"Custom Rust image not found: {rust_custom_path}")
+            if rust_custom_path.suffix.lower() == ".bin":
+                rust_bin = rust_custom_path
+                self._log(f"Rust image (custom bin): {rust_bin}", "info")
+            else:
+                self._log("Custom Rust image is not .bin. Generating .bin from custom ELF…", "warning")
+                rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
+                generate_esp_image_from_elf(rust_custom_path, rust_bin, log_func=self._log)
+        else:
+            try:
+                rust_bin = self._resolve_candidate_path("Rust image", TRIPLE_RUST_BIN_CANDIDATES)
+            except MicroPyError:
+                rust_elf = self._resolve_candidate_path("Rust ELF", TRIPLE_RUST_ELF_CANDIDATES)
+                self._log("Rust BIN not found. Generating from ELF…", "warning")
+                rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
+                generate_esp_image_from_elf(rust_elf, rust_bin, log_func=self._log)
 
         return {
             "bootloader": bootloader,
@@ -812,6 +955,7 @@ class CalSciApp(QMainWindow):
         self.update_btn.setEnabled(True)
         self.flash_btn.setEnabled(True)
         self.flash_triple_btn.setEnabled(True)
+        self.triple_fw_combo.setEnabled(True)
         self.delta_btn.setEnabled(True)
         self.sync_source_combo.setEnabled(True)
         self.upload_custom_btn.setEnabled(True)
@@ -840,6 +984,7 @@ class CalSciApp(QMainWindow):
         self.update_btn.setEnabled(False)
         self.flash_btn.setEnabled(False)
         self.flash_triple_btn.setEnabled(False)
+        self.triple_fw_combo.setEnabled(False)
         self.delta_btn.setEnabled(False)
         self.sync_source_combo.setEnabled(False)
         self.upload_custom_btn.setEnabled(False)
