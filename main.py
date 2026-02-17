@@ -68,6 +68,23 @@ from filebrowser import ESP32FileBrowser
 MAX_CUSTOM_SYNC_SOURCES = 3
 
 
+class StickyPopupComboBox(QComboBox):
+    """QComboBox popup that closes only when explicitly requested."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._allow_hide_popup = False
+
+    def hidePopup(self):
+        if self._allow_hide_popup:
+            self._allow_hide_popup = False
+            super().hidePopup()
+
+    def close_popup_explicitly(self):
+        self._allow_hide_popup = True
+        super().hidePopup()
+
+
 
 # ============================================================
 # ================= MAIN APPLICATION ==========================
@@ -99,11 +116,22 @@ class CalSciApp(QMainWindow):
         self._sync_action_separator = "__sync_action_separator__"
         self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
         self._triple_fw_key_by_index = {}
+        self._selected_triple_flash_keys = set()
+        self._triple_combo_summary_key = "__summary__"
+        self._triple_combo_separator_key = "__separator__"
+        self._triple_action_set_path = {
+            "mpy": "__set_path_mpy__",
+            "cpp": "__set_path_cpp__",
+            "rust": "__set_path_rust__",
+        }
+        self._triple_action_clear_targets = "__clear_targets__"
+        self._triple_action_close_menu = "__close_menu__"
         
         self._build_ui()
         self._apply_stylesheet()
         self._load_sync_sources()
         self._load_triple_firmware_paths()
+        self._update_triple_flash_button_state()
 
         self.device_timer = QTimer()
         self.device_timer.timeout.connect(self._check_device_status)
@@ -177,7 +205,7 @@ class CalSciApp(QMainWindow):
         self.flash_triple_btn.clicked.connect(self._handle_flash_tripleboot)
         triple_row_layout.addWidget(self.flash_triple_btn, 1)
 
-        self.triple_fw_combo = QComboBox()
+        self.triple_fw_combo = StickyPopupComboBox()
         self.triple_fw_combo.setObjectName("syncSourceCombo")
         self.triple_fw_combo.activated.connect(self._on_triple_firmware_option_activated)
         triple_row_layout.addWidget(self.triple_fw_combo, 1)
@@ -667,14 +695,35 @@ class CalSciApp(QMainWindow):
 
     def _triple_firmware_option_text(self, key):
         names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        return names[key]
+
+    def _triple_firmware_path_display_name(self, key):
+        labels = {"mpy": "mpy", "cpp": "cpp", "rust": "rust"}
         current = self._triple_fw_paths.get(key, "")
         if not current:
-            return f"{names[key]}: auto"
-        path = Path(current)
-        suffix = path.name
-        if not path.exists():
-            suffix = f"{suffix} (missing)"
-        return f"{names[key]}: {suffix}"
+            return f"{labels[key]} path:"
+        return f"{labels[key]} path: {current}"
+
+    def _triple_flash_targets_summary(self):
+        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        active = [names[k] for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
+        if not active:
+            return "Targets: None (Full Triple Boot)"
+        return "Targets: " + ", ".join(active)
+
+    def _update_triple_flash_button_state(self):
+        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        active = [names[k] for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
+        if active:
+            self.flash_triple_btn.setText("Flash")
+            self.flash_triple_btn.setToolTip(
+                f"Flash selected firmware only (no erase): {', '.join(active)}"
+            )
+        else:
+            self.flash_triple_btn.setText("Flash Triple Boot")
+            self.flash_triple_btn.setToolTip(
+                "Erase + flash bootloader/partition/ota data + all 3 firmware images"
+            )
 
     def _save_triple_firmware_paths(self):
         payload = {k: self._triple_fw_paths.get(k, "") for k in ("mpy", "cpp", "rust")}
@@ -691,20 +740,91 @@ class CalSciApp(QMainWindow):
         self.triple_fw_combo.clear()
         self._triple_fw_key_by_index = {}
 
-        for idx, key in enumerate(("mpy", "cpp", "rust")):
+        # Summary row (non-selectable)
+        self.triple_fw_combo.addItem(self._triple_flash_targets_summary(), self._triple_combo_summary_key)
+        self._triple_fw_key_by_index[0] = self._triple_combo_summary_key
+
+        # Checkable target rows
+        for idx, key in enumerate(("mpy", "cpp", "rust"), start=1):
             self.triple_fw_combo.addItem(self._triple_firmware_option_text(key), key)
             self._triple_fw_key_by_index[idx] = key
+            checked = key in self._selected_triple_flash_keys
+            self.triple_fw_combo.setItemData(
+                idx,
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
+                Qt.ItemDataRole.CheckStateRole,
+            )
+            model = self.triple_fw_combo.model()
+            item = model.item(idx) if hasattr(model, "item") else None
+            if item is not None:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
 
-        tooltip_lines = []
+        # Separator row
+        sep_idx = self.triple_fw_combo.count()
+        self.triple_fw_combo.addItem("──────────", self._triple_combo_separator_key)
+        self._triple_fw_key_by_index[sep_idx] = self._triple_combo_separator_key
+
+        # Path actions + clear action
+        model = self.triple_fw_combo.model()
+        path_action_rows = []
+        for key in ("mpy", "cpp", "rust"):
+            label = self._triple_firmware_path_display_name(key)
+            path_action_rows.append((label, self._triple_action_set_path[key], key))
+
+        action_rows = path_action_rows + [
+            ("Clear Firmware Targets (all unchecked)", self._triple_action_clear_targets, None),
+            ("Close Menu (X)", self._triple_action_close_menu, None),
+        ]
+        has_selection = bool(self._selected_triple_flash_keys)
+        for label, action_key, target_key in action_rows:
+            idx = self.triple_fw_combo.count()
+            self.triple_fw_combo.addItem(label, action_key)
+            self._triple_fw_key_by_index[idx] = action_key
+            item = model.item(idx) if hasattr(model, "item") else None
+            if item is not None and target_key is not None:
+                flags = item.flags() | Qt.ItemFlag.ItemIsSelectable
+                is_active = (not has_selection) or (target_key in self._selected_triple_flash_keys)
+                if is_active:
+                    flags |= Qt.ItemFlag.ItemIsEnabled
+                else:
+                    flags &= ~Qt.ItemFlag.ItemIsEnabled
+                item.setFlags(flags)
+
+                active_color = QColor("#dddddd")
+                disabled_color = QColor("#dddddd")
+                disabled_color.setAlphaF(0.90)
+                self.triple_fw_combo.setItemData(
+                    idx,
+                    active_color if is_active else disabled_color,
+                    Qt.ItemDataRole.ForegroundRole,
+                )
+
+        summary_item = model.item(0) if hasattr(model, "item") else None
+        if summary_item is not None:
+            summary_item.setEnabled(False)
+        sep_item = model.item(sep_idx) if hasattr(model, "item") else None
+        if sep_item is not None:
+            sep_item.setEnabled(False)
+
+        self.triple_fw_combo.setCurrentIndex(0)
+
         names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        tooltip_lines = []
         for key in ("mpy", "cpp", "rust"):
             value = self._triple_fw_paths.get(key, "")
             if value:
                 tooltip_lines.append(f"{names[key]}: {value}")
             else:
                 tooltip_lines.append(f"{names[key]}: auto")
+        active = [names[k] for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
+        if active:
+            tooltip_lines.append(f"Flash mode: selected only ({', '.join(active)})")
+        else:
+            tooltip_lines.append("Flash mode: full triple-boot")
+        tooltip_lines.append("Use checkbox rows to select firmware targets")
         self.triple_fw_combo.setToolTip("\n".join(tooltip_lines))
         self.triple_fw_combo.blockSignals(False)
+        self._update_triple_flash_button_state()
 
     def _load_triple_firmware_paths(self):
         loaded = {"mpy": "", "cpp": "", "rust": ""}
@@ -722,12 +842,43 @@ class CalSciApp(QMainWindow):
             except Exception:
                 pass
         self._triple_fw_paths = loaded
+        self._selected_triple_flash_keys = set()
         self._refresh_triple_firmware_combo()
         self._save_triple_firmware_paths()
 
+    def _keep_triple_firmware_popup_open(self):
+        if self.triple_fw_combo.isEnabled():
+            QTimer.singleShot(0, self.triple_fw_combo.showPopup)
+
     def _on_triple_firmware_option_activated(self, index):
         key = self._triple_fw_key_by_index.get(index)
-        if key not in {"mpy", "cpp", "rust"}:
+        if key in {self._triple_combo_summary_key, self._triple_combo_separator_key, None}:
+            return
+
+        if key in {"mpy", "cpp", "rust"}:
+            if key in self._selected_triple_flash_keys:
+                self._selected_triple_flash_keys.remove(key)
+            else:
+                self._selected_triple_flash_keys.add(key)
+            self._refresh_triple_firmware_combo()
+            self._keep_triple_firmware_popup_open()
+            if self._selected_triple_flash_keys:
+                active = [k.upper() for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
+                self._log(f"Selected firmware targets: {', '.join(active)}", "info")
+            else:
+                self._log("No firmware target selected: full Triple Boot mode", "info")
+            return
+
+        if key == self._triple_action_clear_targets:
+            self._selected_triple_flash_keys = set()
+            self._refresh_triple_firmware_combo()
+            self._keep_triple_firmware_popup_open()
+            self._log("Firmware targets cleared (full Triple Boot mode)", "info")
+            return
+
+        if key == self._triple_action_close_menu:
+            self.triple_fw_combo.close_popup_explicitly()
+            self._log("Firmware menu closed", "info")
             return
 
         names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
@@ -736,8 +887,19 @@ class CalSciApp(QMainWindow):
             "cpp": "Firmware files (*.bin);;All files (*)",
             "rust": "Firmware files (*.bin *.elf);;All files (*)",
         }
+        action_to_key = {v: k for k, v in self._triple_action_set_path.items()}
+        target_key = action_to_key.get(key)
+        if target_key not in {"mpy", "cpp", "rust"}:
+            return
+        if self._selected_triple_flash_keys and target_key not in self._selected_triple_flash_keys:
+            self._keep_triple_firmware_popup_open()
+            self._log(
+                f"{names[target_key]} path is locked while other target(s) are selected.",
+                "warning",
+            )
+            return
 
-        current = self._triple_fw_paths.get(key, "")
+        current = self._triple_fw_paths.get(target_key, "")
         if current:
             start = Path(current)
             start_dir = str(start.parent if start.exists() else start.parent)
@@ -746,19 +908,22 @@ class CalSciApp(QMainWindow):
 
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            f"Select {names[key]} Firmware",
+            f"Select {names[target_key]} Firmware",
             start_dir,
-            filters[key],
+            filters[target_key],
         )
         if not selected:
             self._refresh_triple_firmware_combo()
+            self._keep_triple_firmware_popup_open()
+            self._log(f"Path selection cancelled for {names[target_key]}", "info")
             return
 
         normalized = self._normalize_firmware_path(selected)
-        self._triple_fw_paths[key] = normalized
+        self._triple_fw_paths[target_key] = normalized
         self._save_triple_firmware_paths()
         self._refresh_triple_firmware_combo()
-        self._log(f"Custom {names[key]} firmware path set: {normalized}", "success")
+        self._keep_triple_firmware_popup_open()
+        self._log(f"Custom {names[target_key]} firmware path set: {normalized}", "success")
 
     def _resolve_candidate_path(self, label, candidates, log_found=True):
         checked = []
@@ -1274,11 +1439,22 @@ class CalSciApp(QMainWindow):
     def _handle_flash_tripleboot(self):
         if not self._ensure_window_sequence("flashing triple-boot firmware"):
             return
+        selected_keys = [k for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
+        selected_name = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
+        selected_offset = {
+            "mpy": TRIPLE_MPY_OFFSET,
+            "cpp": TRIPLE_CPP_OFFSET,
+            "rust": TRIPLE_RUST_OFFSET,
+        }
+        selected_image_key = {
+            "mpy": "micropython",
+            "cpp": "cpp",
+            "rust": "rust",
+        }
 
-        confirm = QMessageBox.question(
-            self,
-            "Confirm Triple-Boot Flash",
-            (
+        if not selected_keys:
+            confirm_title = "Confirm Triple-Boot Flash"
+            confirm_msg = (
                 "This will erase the full chip and flash:\n"
                 "- bootloader\n"
                 "- partition table\n"
@@ -1287,7 +1463,24 @@ class CalSciApp(QMainWindow):
                 "- C++ (ota_1)\n"
                 "- Rust (ota_2)\n\n"
                 "Continue?"
-            ),
+            )
+        else:
+            confirm_title = "Confirm Selected Firmware Flash"
+            lines = []
+            for key in selected_keys:
+                lines.append(f"- {selected_name[key]} ({selected_offset[key]})")
+            confirm_msg = (
+                "This will flash selected firmware only:\n"
+                + "\n".join(lines) + "\n\n"
+                "No full-chip erase will be done.\n"
+                "Bootloader and partition table will not be reflashed.\n\n"
+                "Continue?"
+            )
+
+        confirm = QMessageBox.question(
+            self,
+            confirm_title,
+            confirm_msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         if confirm != QMessageBox.StandardButton.Yes:
@@ -1304,31 +1497,61 @@ class CalSciApp(QMainWindow):
 
                 port = ports[0]
                 self._log(f"CalSci found: {port}", "success")
-                self._log("Starting full triple-boot flash (automatic reset mode)…", "warning")
-                self.bridge.progress_signal.emit(0.05)
-
                 images = self._resolve_triple_boot_images()
                 self.bridge.progress_signal.emit(0.20)
 
-                port = flash_triple_boot_firmware(
-                    port=port,
-                    bootloader_path=images["bootloader"],
-                    partition_table_path=images["partition_table"],
-                    otadata_path=images["otadata"],
-                    micropython_path=images["micropython"],
-                    cpp_path=images["cpp"],
-                    rust_path=images["rust"],
-                    bootloader_offset=TRIPLE_BOOTLOADER_OFFSET,
-                    partition_offset=TRIPLE_PARTITION_TABLE_OFFSET,
-                    otadata_offset=TRIPLE_OTADATA_OFFSET,
-                    micropython_offset=TRIPLE_MPY_OFFSET,
-                    cpp_offset=TRIPLE_CPP_OFFSET,
-                    rust_offset=TRIPLE_RUST_OFFSET,
-                    erase_before=True,
-                    run_after=True,
-                    log_func=self._log,
-                )
-                self._log(f"Triple-boot flash done on {port}", "success")
+                if not selected_keys:
+                    self._log("Starting full triple-boot flash (automatic reset mode)…", "warning")
+                    self.bridge.progress_signal.emit(0.30)
+                    port = flash_triple_boot_firmware(
+                        port=port,
+                        bootloader_path=images["bootloader"],
+                        partition_table_path=images["partition_table"],
+                        otadata_path=images["otadata"],
+                        micropython_path=images["micropython"],
+                        cpp_path=images["cpp"],
+                        rust_path=images["rust"],
+                        bootloader_offset=TRIPLE_BOOTLOADER_OFFSET,
+                        partition_offset=TRIPLE_PARTITION_TABLE_OFFSET,
+                        otadata_offset=TRIPLE_OTADATA_OFFSET,
+                        micropython_offset=TRIPLE_MPY_OFFSET,
+                        cpp_offset=TRIPLE_CPP_OFFSET,
+                        rust_offset=TRIPLE_RUST_OFFSET,
+                        erase_before=True,
+                        run_after=True,
+                        log_func=self._log,
+                    )
+                    self._log(f"Triple-boot flash done on {port}", "success")
+                else:
+                    self._log(
+                        "Starting selected firmware flash (no erase): "
+                        + ", ".join(selected_name[k] for k in selected_keys),
+                        "warning",
+                    )
+                    total_targets = len(selected_keys)
+                    for idx, key in enumerate(selected_keys, start=1):
+                        image_key = selected_image_key[key]
+                        image_path = images[image_key]
+                        target_offset = selected_offset[key]
+                        target_name = selected_name[key]
+                        self._log(
+                            f"[{idx}/{total_targets}] Flashing {target_name} @ {target_offset} (no erase)…",
+                            "info",
+                        )
+                        # Run only after the last selected target to avoid extra resets.
+                        run_after = idx == total_targets
+                        port = flash_firmware(
+                            port=port,
+                            firmware_path=image_path,
+                            offset=target_offset,
+                            erase_before=False,
+                            run_after=run_after,
+                            enter_bootloader=False,
+                            log_func=self._log,
+                        )
+                        self.bridge.progress_signal.emit(0.20 + (0.75 * idx / total_targets))
+                    self._log(f"Selected firmware flash done on {port}", "success")
+
                 self.bridge.progress_signal.emit(1.0)
 
             except Exception as e:
