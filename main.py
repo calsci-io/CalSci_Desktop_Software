@@ -23,9 +23,43 @@ from PySide6.QtCore import Qt, QTimer, QSize, QEvent
 from PySide6.QtGui import QColor, QFont, QAction, QTextCursor
 
 # Import from modular files
-from config import ROOT, FIRMWARE_BIN, SYNC_SOURCES_FILE
+from config import (
+    ROOT,
+    FIRMWARE_BIN,
+    SYNC_SOURCES_FILE,
+    TRIPLE_BOOTLOADER_OFFSET,
+    TRIPLE_PARTITION_TABLE_OFFSET,
+    TRIPLE_OTADATA_OFFSET,
+    TRIPLE_MPY_OFFSET,
+    TRIPLE_CPP_OFFSET,
+    TRIPLE_RUST_OFFSET,
+    TRIPLE_ARTIFACTS_DIR,
+    TRIPLE_LOCAL_RUST_BIN,
+    TRIPLE_BOOTLOADER_CANDIDATES,
+    TRIPLE_PARTITION_TABLE_CANDIDATES,
+    TRIPLE_OTADATA_CANDIDATES,
+    TRIPLE_MPY_CANDIDATES,
+    TRIPLE_CPP_CANDIDATES,
+    TRIPLE_RUST_BIN_CANDIDATES,
+    TRIPLE_RUST_ELF_CANDIDATES,
+    TRIPLE_BOOTLOADER_SOURCE_CANDIDATES,
+    TRIPLE_PARTITION_TABLE_SOURCE_CANDIDATES,
+    TRIPLE_OTADATA_SOURCE_CANDIDATES,
+    TRIPLE_MPY_SOURCE_CANDIDATES,
+    TRIPLE_CPP_SOURCE_CANDIDATES,
+    TRIPLE_RUST_BIN_SOURCE_CANDIDATES,
+    TRIPLE_RUST_ELF_SOURCE_CANDIDATES,
+)
 from utils import find_esp32_ports, ensure_repo, delete_repo, repo_status, pull_repo, get_all_files
-from flasher import MicroPyFlasher, MicroPyError, flash_firmware, confirm_bootloader, wait_for_reset_signal
+from flasher import (
+    MicroPyFlasher,
+    MicroPyError,
+    flash_firmware,
+    flash_triple_boot_firmware,
+    generate_esp_image_from_elf,
+    confirm_bootloader,
+    wait_for_reset_signal,
+)
 from signal_bridge import SignalBridge
 from dialogs import ESP32FileSelectionDialog
 from filebrowser import ESP32FileBrowser
@@ -128,6 +162,11 @@ class CalSciApp(QMainWindow):
         self.flash_btn.setObjectName("btnPrimary")
         self.flash_btn.clicked.connect(self._handle_flash)
         left_layout.addWidget(self.flash_btn)
+
+        self.flash_triple_btn = QPushButton("Flash Triple Boot")
+        self.flash_triple_btn.setObjectName("btnSecondary")
+        self.flash_triple_btn.clicked.connect(self._handle_flash_tripleboot)
+        left_layout.addWidget(self.flash_triple_btn)
 
         self.flash_fw_cb = QCheckBox("Reflash firmware before upload")
         self.flash_fw_cb.setChecked(False)
@@ -607,6 +646,107 @@ class CalSciApp(QMainWindow):
             return None
         return root
 
+    def _resolve_candidate_path(self, label, candidates, log_found=True):
+        checked = []
+        for candidate in candidates:
+            path = Path(candidate)
+            checked.append(str(path))
+            if path.exists():
+                if log_found:
+                    self._log(f"{label}: {path}", "info")
+                return path
+        raise MicroPyError(f"{label} not found. Checked: {' | '.join(checked)}")
+
+    def _sync_local_artifact_from_sources(self, label, local_path, source_candidates):
+        local_path = Path(local_path)
+        src = None
+        for candidate in source_candidates:
+            path = Path(candidate)
+            if path.exists():
+                src = path
+                break
+        if src is None:
+            if not local_path.exists():
+                self._log(f"{label} source not found and local copy missing: {local_path}", "warning")
+            return
+        if local_path.resolve() == src.resolve():
+            return
+        needs_copy = (
+            not local_path.exists()
+            or local_path.stat().st_size != src.stat().st_size
+            or local_path.stat().st_mtime < src.stat().st_mtime
+        )
+        if needs_copy:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, local_path)
+            self._log(f"Updated local {label}: {local_path.name}", "info")
+
+    def _refresh_local_triple_boot_artifacts(self):
+        TRIPLE_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        self._sync_local_artifact_from_sources(
+            "bootloader",
+            TRIPLE_BOOTLOADER_CANDIDATES[0],
+            TRIPLE_BOOTLOADER_SOURCE_CANDIDATES,
+        )
+        self._sync_local_artifact_from_sources(
+            "partition table",
+            TRIPLE_PARTITION_TABLE_CANDIDATES[0],
+            TRIPLE_PARTITION_TABLE_SOURCE_CANDIDATES,
+        )
+        self._sync_local_artifact_from_sources(
+            "ota data",
+            TRIPLE_OTADATA_CANDIDATES[0],
+            TRIPLE_OTADATA_SOURCE_CANDIDATES,
+        )
+        self._sync_local_artifact_from_sources(
+            "MicroPython firmware",
+            TRIPLE_MPY_CANDIDATES[0],
+            TRIPLE_MPY_SOURCE_CANDIDATES,
+        )
+        self._sync_local_artifact_from_sources(
+            "C++ firmware",
+            TRIPLE_CPP_CANDIDATES[0],
+            TRIPLE_CPP_SOURCE_CANDIDATES,
+        )
+        self._sync_local_artifact_from_sources(
+            "Rust firmware bin",
+            TRIPLE_RUST_BIN_CANDIDATES[0],
+            TRIPLE_RUST_BIN_SOURCE_CANDIDATES,
+        )
+        self._sync_local_artifact_from_sources(
+            "Rust ELF",
+            TRIPLE_RUST_ELF_CANDIDATES[0],
+            TRIPLE_RUST_ELF_SOURCE_CANDIDATES,
+        )
+
+    def _resolve_triple_boot_images(self):
+        self._refresh_local_triple_boot_artifacts()
+        bootloader = self._resolve_candidate_path("Bootloader image", TRIPLE_BOOTLOADER_CANDIDATES)
+        partition_table = self._resolve_candidate_path(
+            "Partition table image",
+            TRIPLE_PARTITION_TABLE_CANDIDATES,
+        )
+        otadata = self._resolve_candidate_path("OTA data image", TRIPLE_OTADATA_CANDIDATES)
+        micropython = self._resolve_candidate_path("MicroPython image", TRIPLE_MPY_CANDIDATES)
+        cpp = self._resolve_candidate_path("C++ image", TRIPLE_CPP_CANDIDATES)
+
+        try:
+            rust_bin = self._resolve_candidate_path("Rust image", TRIPLE_RUST_BIN_CANDIDATES)
+        except MicroPyError:
+            rust_elf = self._resolve_candidate_path("Rust ELF", TRIPLE_RUST_ELF_CANDIDATES)
+            self._log("Rust BIN not found. Generating from ELF…", "warning")
+            rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
+            generate_esp_image_from_elf(rust_elf, rust_bin, log_func=self._log)
+
+        return {
+            "bootloader": bootloader,
+            "partition_table": partition_table,
+            "otadata": otadata,
+            "micropython": micropython,
+            "cpp": cpp,
+            "rust": rust_bin,
+        }
+
     def _check_device_status(self):
         if not self.operation_in_progress:
             ports = find_esp32_ports()
@@ -671,6 +811,7 @@ class CalSciApp(QMainWindow):
         self.operation_in_progress = False
         self.update_btn.setEnabled(True)
         self.flash_btn.setEnabled(True)
+        self.flash_triple_btn.setEnabled(True)
         self.delta_btn.setEnabled(True)
         self.sync_source_combo.setEnabled(True)
         self.upload_custom_btn.setEnabled(True)
@@ -698,6 +839,7 @@ class CalSciApp(QMainWindow):
         self.operation_in_progress = True
         self.update_btn.setEnabled(False)
         self.flash_btn.setEnabled(False)
+        self.flash_triple_btn.setEnabled(False)
         self.delta_btn.setEnabled(False)
         self.sync_source_combo.setEnabled(False)
         self.upload_custom_btn.setEnabled(False)
@@ -978,6 +1120,74 @@ class CalSciApp(QMainWindow):
 
             except Exception as e:
                 self._log(f"Error: {str(e)[:80]}", "error")
+                self.bridge.progress_signal.emit(0.0)
+            finally:
+                self.bridge.operation_done_signal.emit()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _handle_flash_tripleboot(self):
+        if not self._ensure_window_sequence("flashing triple-boot firmware"):
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Triple-Boot Flash",
+            (
+                "This will erase the full chip and flash:\n"
+                "- bootloader\n"
+                "- partition table\n"
+                "- ota data\n"
+                "- MicroPython (ota_0)\n"
+                "- C++ (ota_1)\n"
+                "- Rust (ota_2)\n\n"
+                "Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            self._log("Triple-boot flash cancelled", "info")
+            return
+
+        self._lock_buttons()
+
+        def run():
+            try:
+                ports = find_esp32_ports()
+                if not ports:
+                    raise RuntimeError("No CalSci device detected")
+
+                port = ports[0]
+                self._log(f"CalSci found: {port}", "success")
+                self._log("Starting full triple-boot flash (automatic reset mode)…", "warning")
+                self.bridge.progress_signal.emit(0.05)
+
+                images = self._resolve_triple_boot_images()
+                self.bridge.progress_signal.emit(0.20)
+
+                port = flash_triple_boot_firmware(
+                    port=port,
+                    bootloader_path=images["bootloader"],
+                    partition_table_path=images["partition_table"],
+                    otadata_path=images["otadata"],
+                    micropython_path=images["micropython"],
+                    cpp_path=images["cpp"],
+                    rust_path=images["rust"],
+                    bootloader_offset=TRIPLE_BOOTLOADER_OFFSET,
+                    partition_offset=TRIPLE_PARTITION_TABLE_OFFSET,
+                    otadata_offset=TRIPLE_OTADATA_OFFSET,
+                    micropython_offset=TRIPLE_MPY_OFFSET,
+                    cpp_offset=TRIPLE_CPP_OFFSET,
+                    rust_offset=TRIPLE_RUST_OFFSET,
+                    erase_before=True,
+                    run_after=True,
+                    log_func=self._log,
+                )
+                self._log(f"Triple-boot flash done on {port}", "success")
+                self.bridge.progress_signal.emit(1.0)
+
+            except Exception as e:
+                self._log(f"Error: {str(e)[:120]}", "error")
                 self.bridge.progress_signal.emit(0.0)
             finally:
                 self.bridge.operation_done_signal.emit()
