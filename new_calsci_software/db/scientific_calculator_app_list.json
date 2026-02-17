@@ -1,0 +1,32 @@
+[
+    {
+        "name": "graph",
+        "folder": "scientific_calculator",
+        "visibility": true
+    },
+    {
+        "name": "simultanious_eqn_sol",
+        "folder": "scientific_calculator",
+        "visibility": true
+    },
+    {
+        "name": "quad_eqn_sol",
+        "folder": "scientific_calculator",
+        "visibility": true
+    },
+    {
+        "name": "constants",
+        "folder": "scientific_calculator",
+        "visibility": true
+    },
+    {
+        "name": "matrix_operations",
+        "folder": "scientific_calculator",
+        "visibility": true
+    },
+    {
+        "name": "mymolecule",
+        "folder": "scientific_calculator",
+        "visibility": true
+    }
+]

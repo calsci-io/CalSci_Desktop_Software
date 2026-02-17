@@ -1,0 +1,48 @@
+{
+    "_default": {
+        "1": {
+            "app_name": "set",
+            "group_name": "installed_apps"
+        },
+        "2": {
+            "app_name": "add_2_nums",
+            "group_name": "installed_apps"
+        },
+        "3": {
+            "app_name": "ultra_sonic_sensor",
+            "group_name": "installed_apps"
+        },
+        "4": {
+            "app_name": "dsgroup",
+            "group_name": "installed_apps"
+        },
+        "5": {
+            "app_name": "dynamic_form",
+            "group_name": "installed_apps"
+        },
+        "6": {
+            "app_name": "slave_connector",
+            "group_name": "installed_apps"
+        },
+        "7": {
+            "app_name": "dht11",
+            "group_name": "installed_apps"
+        },
+        "8": {
+            "app_name": "data_reciever",
+            "group_name": "installed_apps"
+        },
+        "9": {
+            "app_name": "rgb",
+            "group_name": "installed_apps"
+        },
+        "10": {
+            "app_name": "temp_sensor",
+            "group_name": "installed_apps"
+        },
+        "11": {
+            "app_name": "utc_time",
+            "group_name": "installed_apps"
+        }
+    }
+}
