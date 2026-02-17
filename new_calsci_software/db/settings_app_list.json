@@ -1,0 +1,67 @@
+[
+    {
+        "name": "backlight",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "wifi_app",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "wifi_connector",
+        "folder": "settings",
+        "visibility": false
+    },
+    {
+        "name": "network_status",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "update",
+        "folder": "settings",
+        "visibility": false
+    },
+    {
+        "name": "contrast",
+        "folder": "settings",
+        "visibility": false
+    },
+    {
+        "name": "about_calsci",
+        "folder": "settings",
+        "visibility": false
+    },
+    {
+        "name": "Dark_Mode",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "download_updates",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "mac_address",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "wifi_autoconnect",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "auto_sleep",
+        "folder": "settings",
+        "visibility": true
+    },
+    {
+        "name": "battery_status",
+        "folder": "settings",
+        "visibility": true
+    }
+]

@@ -10,6 +10,7 @@ REPO_URL = "https://github.com/calsci-io/calsci_latest_itr"
 BRANCH = "main"
 ROOT = Path("./calsci_latest_itr")
 SELECTIONS_FILE = Path("./upload_selections.json")
+SYNC_SOURCES_FILE = Path("./sync_sources.json")
 FIRMWARE_BIN = Path(__file__).resolve().parent / "firmware.bin"
 
 # ================= ESP32 SERIAL CONFIG =================

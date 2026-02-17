@@ -530,21 +530,25 @@ class MicroPyFlasher:
 
         return files, dirs
 
-    def get_file_sizes(self):
+    def get_file_sizes(self, timeout: float = 20.0):
         """Get file sizes of all files on CalSci."""
         code = (
             "import os\r\n"
             "result = {}\r\n"
             "def scan(path):\r\n"
             "    try:\r\n"
-            "        for f in os.listdir(path):\r\n"
+            "        for entry in os.ilistdir(path):\r\n"
+            "            f = entry[0]\r\n"
+            "            typ = entry[1]\r\n"
             "            full = path + '/' + f if path != '/' else '/' + f\r\n"
             "            try:\r\n"
-            "                st = os.stat(full)\r\n"
-            "                if st[0] & 0x4000:\r\n"
+            "                if typ & 0x4000:\r\n"
             "                    scan(full)\r\n"
             "                else:\r\n"
-            "                    result[full] = st[6]\r\n"
+            "                    if len(entry) > 3 and isinstance(entry[3], int):\r\n"
+            "                        result[full] = entry[3]\r\n"
+            "                    else:\r\n"
+            "                        result[full] = os.stat(full)[6]\r\n"
             "            except:\r\n"
             "                pass\r\n"
             "    except:\r\n"
@@ -552,7 +556,22 @@ class MicroPyFlasher:
             "scan('/')\r\n"
             "print('SIZES:' + repr(result))\r\n"
         )
-        raw = self._exec_raw_and_read(code, timeout=8.0)
+        raw = ""
+        last_error = None
+        for attempt in range(2):
+            try:
+                raw = self._exec_raw_and_read(code, timeout=timeout)
+                last_error = None
+                break
+            except MicroPyError as e:
+                last_error = e
+                if attempt == 0 and "Timeout waiting for raw REPL output" in str(e):
+                    # Recover from transient REPL stalls (busy startup threads / serial noise)
+                    self._enter_repl()
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
 
         sizes = {}
         try:
@@ -991,11 +1010,17 @@ class MicroPyFlasher:
         result = self._exec_raw_and_read(code, timeout=5.0)
         return "DELETED" in result
 
-    def sync_folder_structure(self, files, log_func):
+    def sync_folder_structure(self, files, log_func, root_path=ROOT):
         """Sync folder structure by creating required folders in order."""
+        root_path = Path(root_path)
         required_folders = set()
         for path in files:
-            rel = path.relative_to(ROOT)
+            local_path = Path(path)
+            try:
+                rel = local_path.relative_to(root_path)
+            except ValueError:
+                log_func(f"  ! {local_path} (outside sync root, skipped)", "warning")
+                continue
             parts = list(rel.parts)
             for i in range(len(parts) - 1):
                 folder_parts = parts[:i + 1]

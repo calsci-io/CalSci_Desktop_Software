@@ -4,6 +4,7 @@ CalSci MicroPython file flasher with Git repository sync.
 """
 
 import sys
+import json
 import shutil
 import subprocess
 import threading
@@ -16,18 +17,20 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QSplitter,
     QFrame, QStatusBar, QMessageBox, QPlainTextEdit, QTabWidget, QMenu,
-    QDialog
+    QDialog, QFileDialog, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QSize, QEvent
 from PySide6.QtGui import QColor, QFont, QAction, QTextCursor
 
 # Import from modular files
-from config import ROOT, FIRMWARE_BIN
+from config import ROOT, FIRMWARE_BIN, SYNC_SOURCES_FILE
 from utils import find_esp32_ports, ensure_repo, delete_repo, repo_status, pull_repo, get_all_files
 from flasher import MicroPyFlasher, MicroPyError, flash_firmware, confirm_bootloader, wait_for_reset_signal
 from signal_bridge import SignalBridge
 from dialogs import ESP32FileSelectionDialog
 from filebrowser import ESP32FileBrowser
+
+MAX_CUSTOM_SYNC_SOURCES = 3
 
 
 
@@ -54,9 +57,15 @@ class CalSciApp(QMainWindow):
         self.file_browser = None
         self._device_connected = False
         self.simulator_process = None
+        self._sync_sources = []
+        self._selected_sync_source = None
+        self._sync_action_add = "__sync_action_add__"
+        self._sync_action_remove = "__sync_action_remove__"
+        self._sync_action_separator = "__sync_action_separator__"
         
         self._build_ui()
         self._apply_stylesheet()
+        self._load_sync_sources()
 
         self.device_timer = QTimer()
         self.device_timer.timeout.connect(self._check_device_status)
@@ -125,10 +134,27 @@ class CalSciApp(QMainWindow):
         self.flash_fw_cb.setObjectName("retryCheckbox")
         left_layout.addWidget(self.flash_fw_cb)
 
+        sync_row = QWidget()
+        sync_row_layout = QHBoxLayout(sync_row)
+        sync_row_layout.setContentsMargins(0, 0, 0, 0)
+        sync_row_layout.setSpacing(8)
+
         self.delta_btn = QPushButton("Sync Files")
-        self.delta_btn.setObjectName("btnSecondary")
+        self.delta_btn.setObjectName("btnSecondaryCompact")
         self.delta_btn.clicked.connect(self._handle_delta_sync)
-        left_layout.addWidget(self.delta_btn)
+        sync_row_layout.addWidget(self.delta_btn, 1)
+
+        self.sync_source_combo = QComboBox()
+        self.sync_source_combo.setObjectName("syncSourceCombo")
+        self.sync_source_combo.currentIndexChanged.connect(self._on_sync_source_changed)
+        sync_row_layout.addWidget(self.sync_source_combo, 1)
+
+        left_layout.addWidget(sync_row)
+
+        self.upload_custom_btn = QPushButton("Upload Custom Folder")
+        self.upload_custom_btn.setObjectName("btnSecondary")
+        self.upload_custom_btn.clicked.connect(self._handle_upload_custom_folder)
+        left_layout.addWidget(self.upload_custom_btn)
 
         self.browse_btn = QPushButton("Code Editor")
         self.browse_btn.setObjectName("btnSecondary")
@@ -238,6 +264,19 @@ class CalSciApp(QMainWindow):
             QPushButton#btnSecondary:pressed { background-color: rgba(233, 84, 32, 0.9); }
             QPushButton#btnSecondary:disabled { background-color: rgba(85, 85, 85, 0.5); color: #777777; border-color: rgba(85, 85, 85, 0.8); }
 
+            QPushButton#btnSecondaryCompact {
+                background-color: rgba(233, 84, 32, 0.5);
+                color: #ffffff;
+                border: 1px solid rgba(233, 84, 32, 0.8);
+                border-radius: 6px;
+                padding: 10px 10px;
+                font-size: 13px;
+                min-width: 0px;
+            }
+            QPushButton#btnSecondaryCompact:hover { background-color: rgba(233, 84, 32, 0.7); }
+            QPushButton#btnSecondaryCompact:pressed { background-color: rgba(233, 84, 32, 0.9); }
+            QPushButton#btnSecondaryCompact:disabled { background-color: rgba(85, 85, 85, 0.5); color: #777777; border-color: rgba(85, 85, 85, 0.8); }
+
             QPushButton#btnDanger {
                 background-color: rgba(233, 84, 32, 0.5);
                 color: #ffffff;
@@ -271,6 +310,25 @@ class CalSciApp(QMainWindow):
             QCheckBox#retryCheckbox::indicator:checked {
                 background-color: #e95420;
                 border-color: #e95420;
+            }
+
+            QComboBox#syncSourceCombo {
+                background-color: #2a2a2a;
+                color: #dddddd;
+                border: 1px solid #444;
+                border-radius: 6px;
+                padding: 6px 8px;
+                min-width: 0px;
+            }
+            QComboBox#syncSourceCombo:hover {
+                border-color: #666;
+            }
+            QComboBox#syncSourceCombo QAbstractItemView {
+                background-color: #1f1f1f;
+                color: #dddddd;
+                border: 1px solid #444;
+                selection-background-color: #e95420;
+                selection-color: #ffffff;
             }
 
             QCheckBox#preventSleepCheckbox {
@@ -333,6 +391,221 @@ class CalSciApp(QMainWindow):
                 padding: 4px 12px;
             }
         """)
+
+    def _default_sync_source_path(self):
+        return str(Path(ROOT).resolve())
+
+    def _normalize_sync_source_path(self, path_str):
+        return str(Path(path_str).expanduser().resolve())
+
+    def _sync_source_display_name(self, path_str):
+        if path_str == self._default_sync_source_path():
+            return f"{path_str} (default)"
+        if not Path(path_str).exists():
+            return f"{path_str} (missing)"
+        return path_str
+
+    def _save_sync_sources(self):
+        payload = {
+            "sources": self._sync_sources,
+            "selected": self._selected_sync_source,
+        }
+        try:
+            SYNC_SOURCES_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._log(f"Failed to save sync source settings: {e}", "warning")
+
+    def _refresh_sync_source_combo(self):
+        self.sync_source_combo.blockSignals(True)
+        self.sync_source_combo.clear()
+
+        for path_str in self._sync_sources:
+            self.sync_source_combo.addItem(self._sync_source_display_name(path_str), path_str)
+
+        if self._selected_sync_source in self._sync_sources:
+            idx = self._sync_sources.index(self._selected_sync_source)
+        else:
+            idx = 0
+            self._selected_sync_source = self._sync_sources[0] if self._sync_sources else None
+
+        sep_index = self.sync_source_combo.count()
+        self.sync_source_combo.addItem("──────────", self._sync_action_separator)
+        self.sync_source_combo.addItem("Add Local Folder...", self._sync_action_add)
+        self.sync_source_combo.addItem("Remove Current Folder...", self._sync_action_remove)
+
+        model = self.sync_source_combo.model()
+        sep_item = model.item(sep_index)
+        if sep_item is not None:
+            sep_item.setEnabled(False)
+
+        if idx >= 0 and self.sync_source_combo.count() > 0:
+            self.sync_source_combo.setCurrentIndex(idx)
+            selected = self.sync_source_combo.itemData(idx)
+            self.sync_source_combo.setToolTip(selected if selected else "")
+
+        self.sync_source_combo.blockSignals(False)
+        self._update_sync_source_controls()
+
+    def _load_sync_sources(self):
+        default_path = self._default_sync_source_path()
+        sources = [default_path]
+        selected = default_path
+        custom_count = 0
+
+        if SYNC_SOURCES_FILE.exists():
+            try:
+                raw = json.loads(SYNC_SOURCES_FILE.read_text(encoding="utf-8"))
+                raw_sources = raw.get("sources", [])
+                raw_selected = raw.get("selected", "")
+
+                if isinstance(raw_sources, list):
+                    for item in raw_sources:
+                        if not isinstance(item, str) or not item.strip():
+                            continue
+                        try:
+                            normalized = self._normalize_sync_source_path(item)
+                        except Exception:
+                            continue
+                        if normalized == default_path:
+                            continue
+                        if custom_count >= MAX_CUSTOM_SYNC_SOURCES:
+                            continue
+                        if normalized not in sources:
+                            sources.append(normalized)
+                            custom_count += 1
+
+                if isinstance(raw_selected, str) and raw_selected.strip():
+                    try:
+                        selected = self._normalize_sync_source_path(raw_selected)
+                    except Exception:
+                        selected = default_path
+            except Exception:
+                selected = default_path
+
+        if default_path not in sources:
+            sources.insert(0, default_path)
+        if selected not in sources:
+            selected = default_path
+
+        self._sync_sources = sources
+        self._selected_sync_source = selected
+        self._refresh_sync_source_combo()
+        self._save_sync_sources()
+
+    def _update_sync_source_controls(self):
+        if self.operation_in_progress:
+            return
+
+        default_path = self._default_sync_source_path()
+        current = self._selected_sync_source or default_path
+        custom_count = len([p for p in self._sync_sources if p != default_path])
+        can_add = custom_count < MAX_CUSTOM_SYNC_SOURCES
+        can_remove = current != default_path
+
+        model = self.sync_source_combo.model()
+        if model is None:
+            return
+
+        for i in range(self.sync_source_combo.count()):
+            data = self.sync_source_combo.itemData(i)
+            item = model.item(i)
+            if item is None:
+                continue
+            if data == self._sync_action_add:
+                label = "Add Local Folder..."
+                if not can_add:
+                    label = f"Add Local Folder... (max {MAX_CUSTOM_SYNC_SOURCES})"
+                self.sync_source_combo.setItemText(i, label)
+                item.setEnabled(can_add)
+            elif data == self._sync_action_remove:
+                item.setEnabled(can_remove)
+
+    def _on_sync_source_changed(self, index):
+        if index < 0:
+            return
+        selected = self.sync_source_combo.itemData(index)
+        if selected == self._sync_action_add:
+            self._handle_add_sync_source()
+            return
+        if selected == self._sync_action_remove:
+            self._handle_remove_sync_source()
+            return
+        if selected == self._sync_action_separator:
+            self._refresh_sync_source_combo()
+            return
+        if not selected:
+            return
+        self._selected_sync_source = selected
+        self.sync_source_combo.setToolTip(selected)
+        self._save_sync_sources()
+        self._update_sync_source_controls()
+
+    def _handle_add_sync_source(self):
+        default_path = self._default_sync_source_path()
+        custom_count = len([p for p in self._sync_sources if p != default_path])
+        if custom_count >= MAX_CUSTOM_SYNC_SOURCES:
+            self._log(
+                f"Only {MAX_CUSTOM_SYNC_SOURCES} custom sync folders are allowed. Remove one to add another.",
+                "warning",
+            )
+            self._refresh_sync_source_combo()
+            return
+
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Sync Source Folder",
+            str(Path.home())
+        )
+        if not selected:
+            self._refresh_sync_source_combo()
+            return
+
+        try:
+            normalized = self._normalize_sync_source_path(selected)
+        except Exception as e:
+            self._log(f"Invalid folder: {e}", "error")
+            self._refresh_sync_source_combo()
+            return
+
+        if normalized not in self._sync_sources:
+            self._sync_sources.append(normalized)
+            self._log(f"Added sync folder: {normalized}", "success")
+        else:
+            self._log(f"Sync folder already exists: {normalized}", "info")
+
+        self._selected_sync_source = normalized
+        self._refresh_sync_source_combo()
+        self._save_sync_sources()
+
+    def _handle_remove_sync_source(self):
+        current = self._selected_sync_source or self._default_sync_source_path()
+        default_path = self._default_sync_source_path()
+
+        if current == default_path:
+            self._log("Default sync folder cannot be removed", "warning")
+            self._refresh_sync_source_combo()
+            return
+
+        if current in self._sync_sources:
+            self._sync_sources.remove(current)
+            self._selected_sync_source = default_path
+            self._refresh_sync_source_combo()
+            self._save_sync_sources()
+            self._log(f"Removed sync folder: {current}", "info")
+            return
+
+        self._refresh_sync_source_combo()
+
+    def _get_selected_sync_root(self):
+        selected = self._selected_sync_source or self._default_sync_source_path()
+        root = Path(selected)
+        if not root.exists():
+            self._log(f"Selected sync folder not found: {root}", "error")
+            return None
+        if not root.is_dir():
+            self._log(f"Selected sync path is not a folder: {root}", "error")
+            return None
+        return root
 
     def _check_device_status(self):
         if not self.operation_in_progress:
@@ -399,9 +672,12 @@ class CalSciApp(QMainWindow):
         self.update_btn.setEnabled(True)
         self.flash_btn.setEnabled(True)
         self.delta_btn.setEnabled(True)
+        self.sync_source_combo.setEnabled(True)
+        self.upload_custom_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.clear_btn.setEnabled(True)
         self.simulator_btn.setEnabled(True)
+        self._update_sync_source_controls()
         self._check_device_status()
 
     def _ensure_window_sequence(self, action_label):
@@ -423,6 +699,8 @@ class CalSciApp(QMainWindow):
         self.update_btn.setEnabled(False)
         self.flash_btn.setEnabled(False)
         self.delta_btn.setEnabled(False)
+        self.sync_source_combo.setEnabled(False)
+        self.upload_custom_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
         self.simulator_btn.setEnabled(False)
@@ -478,13 +756,13 @@ class CalSciApp(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _handle_delta_sync(self):
-        if not ROOT.exists():
-            self._log("Repository not found. Click 'Download Updates' first.", "error")
+        sync_root = self._get_selected_sync_root()
+        if sync_root is None:
             return
 
-        local_files = get_all_files(ROOT)
+        local_files = get_all_files(sync_root)
         if not local_files:
-            self._log("No local files found in repository", "error")
+            self._log(f"No local files found in sync folder: {sync_root}", "error")
             return
 
         self._lock_buttons()
@@ -497,6 +775,7 @@ class CalSciApp(QMainWindow):
 
                 port = ports[0]
                 self._log(f"CalSci found: {port}", "success")
+                self._log(f"Sync source: {sync_root}", "info")
                 self.bridge.progress_signal.emit(0.05)
 
                 flasher = MicroPyFlasher(port)
@@ -504,13 +783,13 @@ class CalSciApp(QMainWindow):
                 # flasher.reset_soft_automated(auto_cd="/apps/installed_apps", log_func=self._log)
 
                 self._log("Scanning CalSci file system…", "info")
-                esp32_sizes = flasher.get_file_sizes()
+                esp32_sizes = flasher.get_file_sizes(timeout=25.0)
                 self._log(f"CalSci has {len(esp32_sizes)} file(s)", "info")
                 self.bridge.progress_signal.emit(0.10)
 
                 local_map = {}
                 for p in local_files:
-                    remote = "/" + p.relative_to(ROOT).as_posix()
+                    remote = "/" + p.relative_to(sync_root).as_posix()
                     local_map[remote] = p
 
                 to_upload   = []
@@ -575,7 +854,7 @@ class CalSciApp(QMainWindow):
 
                 if to_upload:
                     files_for_sync = [lp for _, lp in to_upload]
-                    flasher.sync_folder_structure(files_for_sync, self._log)
+                    flasher.sync_folder_structure(files_for_sync, self._log, root_path=sync_root)
                     self.bridge.progress_signal.emit(0.35)
 
                     total_size = max(sum(lp.stat().st_size for _, lp in to_upload), 1)
@@ -662,7 +941,7 @@ class CalSciApp(QMainWindow):
                     self._log("No files to upload", "info")
                     return
 
-                flasher.sync_folder_structure(files, self._log)
+                flasher.sync_folder_structure(files, self._log, root_path=ROOT)
                 self.bridge.progress_signal.emit(0.05)
 
                 total_size = max(sum(p.stat().st_size for p in files), 1)
@@ -695,6 +974,109 @@ class CalSciApp(QMainWindow):
                     self._log(f"Done with {len(failed_files)} failure(s)", "warning")
                 else:
                     self._log("Flash complete ✓", "success")
+                    self.bridge.progress_signal.emit(1.0)
+
+            except Exception as e:
+                self._log(f"Error: {str(e)[:80]}", "error")
+                self.bridge.progress_signal.emit(0.0)
+            finally:
+                self.bridge.operation_done_signal.emit()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _handle_upload_custom_folder(self):
+        if not self._ensure_window_sequence("uploading a custom folder"):
+            return
+
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Upload",
+            str(Path.home())
+        )
+        if not selected:
+            self._log("Custom folder upload cancelled", "info")
+            return
+
+        local_root = Path(selected)
+        files = sorted(get_all_files(local_root))
+        if not files:
+            self._log("Selected folder has no uploadable files", "warning")
+            return
+
+        # If package looks like a filesystem root (contains boot/main),
+        # upload contents directly to "/" instead of nesting under folder name.
+        has_root_entry = any((local_root / name).is_file() for name in ("boot.py", "main.py"))
+        remote_root = "" if has_root_entry else (local_root.name.strip() or "custom_upload")
+        target_root = "/" if not remote_root else f"/{remote_root}"
+        self._lock_buttons()
+
+        def run():
+            try:
+                ports = find_esp32_ports()
+                if not ports:
+                    raise RuntimeError("No CalSci device detected")
+
+                port = ports[0]
+                self._log(f"CalSci found: {port}", "success")
+                if has_root_entry:
+                    self._log("Detected boot/main package; uploading directly to '/'", "info")
+                self._log(
+                    f"Uploading '{local_root}' to '{target_root}' ({len(files)} file(s))…",
+                    "info"
+                )
+                self.bridge.progress_signal.emit(0.05)
+
+                flasher = MicroPyFlasher(port)
+                auto_retry = self.auto_retry_cb.isChecked()
+
+                required_dirs = {remote_root} if remote_root else set()
+                for local_path in files:
+                    rel_parent = local_path.relative_to(local_root).parent
+                    if rel_parent == Path("."):
+                        continue
+                    cur = remote_root
+                    for part in rel_parent.parts:
+                        cur = f"{cur}/{part}" if cur else part
+                        required_dirs.add(cur)
+
+                if required_dirs:
+                    self._log("Creating folder structure…", "info")
+                    for folder in sorted(required_dirs, key=lambda d: len(d.split("/"))):
+                        if flasher.mkdir(folder):
+                            self._log(f"  + {folder}", "info")
+                        else:
+                            self._log(f"  ! {folder} (failed)", "warning")
+                self._log("Folder structure synced ✓", "success")
+                self.bridge.progress_signal.emit(0.10)
+
+                total_size = max(sum(p.stat().st_size for p in files), 1)
+                uploaded = 0
+                failed_files = []
+                self._log(f"Uploading {len(files)} files…", "info")
+
+                for i, local_path in enumerate(files, 1):
+                    rel = local_path.relative_to(local_root).as_posix()
+                    remote_path = f"{remote_root}/{rel}" if remote_root else rel
+                    flasher, success = self._upload_single_file(
+                        flasher, port, local_path, remote_path, auto_retry,
+                        ensure_dirs=False, use_raw=True
+                    )
+
+                    if success:
+                        uploaded += max(local_path.stat().st_size, 1)
+                        self.bridge.progress_signal.emit(0.1 + (uploaded / total_size) * 0.9)
+                        self._log(f"[{i}/{len(files)}] {local_path.name}", "info")
+                    else:
+                        failed_files.append(local_path.name)
+                        self._log(f"⚠ Skipped: {local_path.name}", "warning")
+
+                flasher.exit_raw_repl()
+                flasher.close()
+
+                if failed_files:
+                    self._log(f"Custom upload done with {len(failed_files)} failure(s)", "warning")
+                else:
+                    self._log("Custom folder upload complete ✓", "success")
                     self.bridge.progress_signal.emit(1.0)
 
             except Exception as e:
