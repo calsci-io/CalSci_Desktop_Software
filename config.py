@@ -11,6 +11,7 @@ BRANCH = "main"
 ROOT = Path("./calsci_latest_itr")
 SELECTIONS_FILE = Path("./upload_selections.json")
 SYNC_SOURCES_FILE = Path("./sync_sources.json")
+TRIPLE_FIRMWARE_PATHS_FILE = Path("./triple_firmware_paths.json")
 APP_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = APP_DIR.parent
 FIRMWARE_BIN = APP_DIR / "firmware.bin"
