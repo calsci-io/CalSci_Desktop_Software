@@ -1,5 +1,5 @@
 {
-  "mpy": "/home/sobik/CalSci_Desktop_Software/triple_boot_images/micropython.bin",
-  "cpp": "/home/sobik/dino_cpp_firmware/build/dino_cpp_ota.bin",
-  "rust": "/home/sobik/CalSci_Desktop_Software/triple_boot_images/rust_app.bin"
+  "mpy": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/micropython.bin",
+  "cpp": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/cpp_app.bin",
+  "rust": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/rust_app.bin"
 }

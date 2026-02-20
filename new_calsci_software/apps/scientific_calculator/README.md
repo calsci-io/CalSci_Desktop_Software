@@ -34,6 +34,7 @@ Open **Scientific Calculator** from the root menu and select a tool. Most screen
 ### Base controls
 
 - Press `ok` from the graph form to render the function.
+- Press `toolbox` from the graph form to render immediately and open graph-tool selection in one step.
 - Press `+` / `-` to zoom in/out.
 - With cursor OFF, use `nav_u` / `nav_d` / `nav_l` / `nav_r` to pan.
 - Press `a` (or `A`) to toggle cursor mode.
@@ -68,3 +69,9 @@ Open **Scientific Calculator** from the root menu and select a tool. Most screen
 
 When graph features are active (`Area`, `Tangent`, `Normal`), each tool stores its own math-space x-values, not only screen pixels.  
 This means zoom and pan do not change selected x-values or area interval endpoints; only their screen positions are remapped.
+
+### Common input issues
+
+- If the bottom status row shows `bounds err`, one of `x_min`, `x_max`, `y_min`, `y_max` is invalid (not numeric, infinite, or zero-size range).
+- If you accidentally swap min/max values, the graph normalizes them automatically.
+- `ans` is accepted in graph expressions and bounds as a valid symbol (defaults to `0.0` in graph context).

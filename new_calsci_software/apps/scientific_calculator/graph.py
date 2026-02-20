@@ -105,6 +105,8 @@ EVAL_GLOBALS = {
     # Constants
     "pi": math.pi,
     "e": math.e,
+    # Shared with main calculator input (`ans` key inserts this symbol).
+    "ans": 0.0,
 }
 
 
@@ -463,13 +465,40 @@ def safe_eval(eval_fn, x_value):
         return None
 
 
+def _is_finite_number(value):
+    return value == value and value != float("inf") and value != float("-inf")
+
+
+def _as_finite_float(value, label):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(label + " must be numeric")
+    value = float(value)
+    if not _is_finite_number(value):
+        raise ValueError(label + " must be finite")
+    return value
+
+
+def _normalize_bounds(bounds):
+    if bounds["x_min"] > bounds["x_max"]:
+        bounds["x_min"], bounds["x_max"] = bounds["x_max"], bounds["x_min"]
+    if bounds["y_min"] > bounds["y_max"]:
+        bounds["y_min"], bounds["y_max"] = bounds["y_max"], bounds["y_min"]
+
+    if bounds["x_min"] == bounds["x_max"]:
+        raise ValueError("x range is zero")
+    if bounds["y_min"] == bounds["y_max"]:
+        raise ValueError("y range is zero")
+    return bounds
+
+
 def get_bounds():
-    return {
-        "x_min": eval(form.inp_list()["inp_1"], EVAL_GLOBALS),
-        "x_max": eval(form.inp_list()["inp_2"], EVAL_GLOBALS),
-        "y_min": eval(form.inp_list()["inp_3"], EVAL_GLOBALS),
-        "y_max": eval(form.inp_list()["inp_4"], EVAL_GLOBALS),
+    bounds = {
+        "x_min": _as_finite_float(eval(form.inp_list()["inp_1"], EVAL_GLOBALS), "x_min"),
+        "x_max": _as_finite_float(eval(form.inp_list()["inp_2"], EVAL_GLOBALS), "x_max"),
+        "y_min": _as_finite_float(eval(form.inp_list()["inp_3"], EVAL_GLOBALS), "y_min"),
+        "y_max": _as_finite_float(eval(form.inp_list()["inp_4"], EVAL_GLOBALS), "y_max"),
     }
+    return _normalize_bounds(bounds)
 
 
 def update_bounds(bounds):
@@ -1209,17 +1238,42 @@ def graph(db={}):
                 current_app[1] = "root"
                 return
 
-            if inp == "ok":
+            if inp in ("ok", "toolbox"):
+                open_toolbox_after_plot = inp == "toolbox"
                 try:
                     bounds = get_bounds()
                 except Exception as exc:
                     _dprint("Bounds parse error:", exc)
+                    form_refresh.refresh(state="bounds err")
                     continue
 
                 gc.collect()
                 expression = form.inp_list()["inp_0"]
                 replot(fb, fb_buf, expression, bounds, cursor, cache_buf, tool_state)
                 fast_poll_block_until_ms = None
+
+                if open_toolbox_after_plot:
+                    _restore_default_poll()
+                    selected_mode = _open_toolbox_menu(fb, fb_buf, tool_state)
+                    if selected_mode == "home":
+                        current_app[0] = "home"
+                        current_app[1] = "root"
+                        return
+                    if selected_mode is not None:
+                        if not cursor.active:
+                            cursor.toggle()
+                        tool_state.set_mode(selected_mode, cursor, bounds)
+                    feature_active = cursor.active or tool_state.active
+                    if feature_active:
+                        _restore_default_poll()
+                        fast_poll_block_until_ms = None
+                    else:
+                        _restore_default_poll()
+                        fast_poll_block_until_ms = _ticks_add(
+                            time.ticks_ms(), FAST_POLL_RESUME_DELAY_MS
+                        )
+                    expression = form.inp_list()["inp_0"]
+                    replot(fb, fb_buf, expression, bounds, cursor, cache_buf, tool_state)
 
                 try:
                     while True:
@@ -1398,9 +1452,6 @@ def graph(db={}):
             elif inp in ("alpha", "beta"):
                 keypad_state_manager(x=inp)
                 form.update_buffer("")
-
-            elif inp == "toolbox":
-                pass
 
             elif inp not in ("ok",):
                 form.update_buffer(inp)
