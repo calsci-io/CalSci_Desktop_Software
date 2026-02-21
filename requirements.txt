@@ -19,11 +19,14 @@ Pygments==2.19.2
 pyinstaller==6.18.0
 pyinstaller-hooks-contrib==2026.0
 pyserial==3.5
+PySide6==6.10.2
+PySide6_Addons==6.10.2
+PySide6_Essentials==6.10.2
 python-dotenv==1.2.1
 PyYAML==6.0.3
 reedsolo==1.7.0
 rich==14.3.1
 rich-click==1.9.6
 setuptools==80.10.2
-shiboken6==6.10.1
+shiboken6==6.10.2
 smmap==5.0.2
