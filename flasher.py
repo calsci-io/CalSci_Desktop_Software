@@ -29,7 +29,7 @@ class MicroPyError(Exception):
 
 def _build_esptool_cmd(port: str, firmware_path: Path, baudrate: int, offset: str, chip: str,
                        before: str = ESP_BEFORE, after: str = ESP_AFTER,
-                       connect_attempts: int = ESP_CONNECT_ATTEMPTS):
+                       connect_attempts: int = ESP_CONNECT_ATTEMPTS) -> list:
     """Build esptool command using current Python env if possible."""
     if importlib.util.find_spec("esptool") is not None:
         return [
@@ -514,80 +514,53 @@ def flash_triple_boot_firmware(
             log_func=log_func,
         )
 
-    if run_after:
-        if log_func:
-            log_func("Starting firmware after flash…", "info")
-        port = _run_esptool_with_connect_retries(
-            _build_esptool_run_cmd,
-            port=port,
-            chip=chip,
-            baudrate=baudrate,
-            after=ESP_AFTER_RUN,
-            stage_name="run",
-            log_func=log_func,
-            before_modes=("no-reset", ESP_BEFORE, "default-reset"),
-        )
-
     if log_func:
         log_func("Triple-boot flash complete ✓", "success")
+        log_func("Device booted automatically (hard-reset mode).", "info")
     return port
 
 
 def flash_firmware(port: str, firmware_path: Path = FIRMWARE_BIN, baudrate: int = BAUDRATE,
                    offset: str = "0x0", chip: str = ESP_CHIP, erase_before: bool = True,
                    run_after: bool = False, enter_bootloader: bool = False, log_func=None) -> str:
-    """Flash firmware.bin using esptool."""
+    """Flash firmware.bin using esptool with automatic retry on connection issues."""
     firmware_path = Path(firmware_path)
     if not firmware_path.exists():
         raise MicroPyError(f"Firmware not found: {firmware_path}")
 
-    if enter_bootloader:
-        if log_func:
-            log_func("Entering bootloader…", "info")
-        boot_ok = False
-        for before_mode in (ESP_BEFORE, "default-reset"):
-            try:
-                boot_cmd = _build_esptool_boot_cmd(port, baudrate, chip, before=before_mode)
-                _run_esptool(boot_cmd, log_func=log_func)
-                boot_ok = True
-                break
-            except MicroPyError as e:
-                if log_func:
-                    log_func(f"Bootloader attempt ({before_mode}) failed: {str(e)[:80]}", "warning")
-        if not boot_ok and log_func:
-            log_func("Continuing without explicit bootloader confirmation…", "warning")
+    if log_func:
+        log_func("Using automatic USB reset mode (no manual BOOT/RESET needed).", "info")
 
     if erase_before:
         if log_func:
-            log_func("Erasing flash…", "info")
-        erase_cmd = _build_esptool_erase_cmd(port, baudrate, chip, after=ESP_AFTER_ERASE)
-        _run_esptool(erase_cmd, log_func=log_func)
-        port = _wait_for_port(port, log_func=log_func)
+            log_func("Erasing flash…", "warning")
+        port = _run_esptool_with_connect_retries(
+            _build_esptool_erase_cmd,
+            port=port,
+            chip=chip,
+            baudrate=baudrate,
+            after=ESP_AFTER_ERASE,
+            stage_name="erase-flash",
+            log_func=log_func,
+        )
 
     if log_func:
         log_func("Flashing firmware…", "info")
-    cmd = _build_esptool_cmd(port, firmware_path, baudrate, offset, chip, after=ESP_AFTER_FLASH)
-    try:
-        _run_esptool(cmd, log_func=log_func)
-    except MicroPyError as e:
-        msg = str(e)
-        if "could not open" in msg.lower() or "no such file" in msg.lower():
-            port = _wait_for_port(port, log_func=log_func)
-            cmd = _build_esptool_cmd(port, firmware_path, baudrate, offset, chip, after=ESP_AFTER_FLASH)
-            _run_esptool(cmd, log_func=log_func)
-        else:
-            raise
-    port = _wait_for_port(port, log_func=log_func)
-
-    if run_after:
-        if log_func:
-            log_func("Starting application (run)…", "info")
-        run_cmd = _build_esptool_run_cmd(port, baudrate, chip, after=ESP_AFTER_RUN)
-        _run_esptool(run_cmd, log_func=log_func)
-        port = _wait_for_port(port, log_func=log_func)
+    port = _run_esptool_with_connect_retries(
+        lambda port, baudrate, chip, before, after: _build_esptool_cmd(
+            port, firmware_path, baudrate, offset, chip, before=before, after=after
+        ),
+        port=port,
+        chip=chip,
+        baudrate=baudrate,
+        after=ESP_AFTER_FLASH,
+        stage_name="flash-firmware",
+        log_func=log_func,
+    )
 
     if log_func:
         log_func("Firmware flash complete ✓", "success")
+        log_func("Device booted automatically (hard-reset mode).", "info")
     return port
 
 

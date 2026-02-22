@@ -4,6 +4,7 @@ CalSci MicroPython file flasher with Git repository sync.
 """
 
 import sys
+import os
 import json
 import shutil
 import subprocess
@@ -17,17 +18,15 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QSplitter,
     QFrame, QStatusBar, QMessageBox, QPlainTextEdit, QTabWidget, QMenu,
-    QDialog, QFileDialog, QComboBox
+    QDialog, QFileDialog
 )
 from PySide6.QtCore import Qt, QTimer, QSize, QEvent
-from PySide6.QtGui import QColor, QFont, QAction, QTextCursor
+from PySide6.QtGui import QTextCursor
 
 # Import from modular files
 from config import (
     ROOT,
     FIRMWARE_BIN,
-    SYNC_SOURCES_FILE,
-    TRIPLE_FIRMWARE_PATHS_FILE,
     TRIPLE_BOOTLOADER_OFFSET,
     TRIPLE_PARTITION_TABLE_OFFSET,
     TRIPLE_OTADATA_OFFSET,
@@ -65,27 +64,6 @@ from signal_bridge import SignalBridge
 from dialogs import ESP32FileSelectionDialog
 from filebrowser import ESP32FileBrowser
 
-MAX_CUSTOM_SYNC_SOURCES = 3
-
-
-class StickyPopupComboBox(QComboBox):
-    """QComboBox popup that closes only when explicitly requested."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._allow_hide_popup = False
-
-    def hidePopup(self):
-        if self._allow_hide_popup:
-            self._allow_hide_popup = False
-            super().hidePopup()
-
-    def close_popup_explicitly(self):
-        self._allow_hide_popup = True
-        super().hidePopup()
-
-
-
 # ============================================================
 # ================= MAIN APPLICATION ==========================
 # ============================================================
@@ -109,28 +87,16 @@ class CalSciApp(QMainWindow):
         self.file_browser = None
         self._device_connected = False
         self.simulator_process = None
-        self._sync_sources = []
-        self._selected_sync_source = None
-        self._sync_action_add = "__sync_action_add__"
-        self._sync_action_remove = "__sync_action_remove__"
-        self._sync_action_separator = "__sync_action_separator__"
+        self._cross_sync_enabled = False
+        self._cross_sync_root = ""
         self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
-        self._triple_fw_key_by_index = {}
         self._selected_triple_flash_keys = set()
-        self._triple_combo_summary_key = "__summary__"
-        self._triple_combo_separator_key = "__separator__"
-        self._triple_action_set_path = {
-            "mpy": "__set_path_mpy__",
-            "cpp": "__set_path_cpp__",
-            "rust": "__set_path_rust__",
-        }
-        self._triple_action_clear_targets = "__clear_targets__"
-        self._triple_action_close_menu = "__close_menu__"
+        self._triple_checkboxes = {}
         
         self._build_ui()
         self._apply_stylesheet()
-        self._load_sync_sources()
-        self._load_triple_firmware_paths()
+        self._initialize_sync_source_controls()
+        self._initialize_triple_firmware_controls()
         self._update_triple_flash_button_state()
 
         self.device_timer = QTimer()
@@ -185,15 +151,22 @@ class CalSciApp(QMainWindow):
         left_layout.setSpacing(10)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.update_btn = QPushButton("Download Updates")
-        self.update_btn.setObjectName("btnSecondary")
-        self.update_btn.clicked.connect(self._handle_update)
-        left_layout.addWidget(self.update_btn)
+        update_row = QWidget()
+        update_row_layout = QHBoxLayout(update_row)
+        update_row_layout.setContentsMargins(0, 0, 0, 0)
+        update_row_layout.setSpacing(8)
 
-        self.flash_btn = QPushButton("Flash All Files")
-        self.flash_btn.setObjectName("btnPrimary")
-        self.flash_btn.clicked.connect(self._handle_flash)
-        left_layout.addWidget(self.flash_btn)
+        self.update_btn = QPushButton("Update CalSci")
+        self.update_btn.setObjectName("btnSecondaryCompact")
+        self.update_btn.clicked.connect(self._handle_update)
+        update_row_layout.addWidget(self.update_btn, 1)
+
+        self.update_with_fw_cb = QCheckBox("with firmware")
+        self.update_with_fw_cb.setChecked(False)
+        self.update_with_fw_cb.setObjectName("inlineOptionCheckbox")
+        update_row_layout.addWidget(self.update_with_fw_cb, 1)
+
+        left_layout.addWidget(update_row)
 
         triple_row = QWidget()
         triple_row_layout = QHBoxLayout(triple_row)
@@ -205,17 +178,16 @@ class CalSciApp(QMainWindow):
         self.flash_triple_btn.clicked.connect(self._handle_flash_tripleboot)
         triple_row_layout.addWidget(self.flash_triple_btn, 1)
 
-        self.triple_fw_combo = StickyPopupComboBox()
-        self.triple_fw_combo.setObjectName("syncSourceCombo")
-        self.triple_fw_combo.activated.connect(self._on_triple_firmware_option_activated)
-        triple_row_layout.addWidget(self.triple_fw_combo, 1)
+        for key, label in (("mpy", "mpy"), ("cpp", "cpp"), ("rust", "rust")):
+            checkbox = QCheckBox(label)
+            checkbox.setObjectName("tripleTargetCheckbox")
+            checkbox.toggled.connect(
+                lambda checked, target_key=key: self._on_triple_target_toggled(target_key, checked)
+            )
+            self._triple_checkboxes[key] = checkbox
+            triple_row_layout.addWidget(checkbox)
 
         left_layout.addWidget(triple_row)
-
-        self.flash_fw_cb = QCheckBox("Reflash firmware before upload")
-        self.flash_fw_cb.setChecked(False)
-        self.flash_fw_cb.setObjectName("retryCheckbox")
-        left_layout.addWidget(self.flash_fw_cb)
 
         sync_row = QWidget()
         sync_row_layout = QHBoxLayout(sync_row)
@@ -227,10 +199,11 @@ class CalSciApp(QMainWindow):
         self.delta_btn.clicked.connect(self._handle_delta_sync)
         sync_row_layout.addWidget(self.delta_btn, 1)
 
-        self.sync_source_combo = QComboBox()
-        self.sync_source_combo.setObjectName("syncSourceCombo")
-        self.sync_source_combo.currentIndexChanged.connect(self._on_sync_source_changed)
-        sync_row_layout.addWidget(self.sync_source_combo, 1)
+        self.cross_sync_cb = QCheckBox("cross software folder")
+        self.cross_sync_cb.setObjectName("inlineOptionCheckbox")
+        self.cross_sync_cb.setChecked(False)
+        self.cross_sync_cb.toggled.connect(self._on_cross_sync_toggled)
+        sync_row_layout.addWidget(self.cross_sync_cb, 1)
 
         left_layout.addWidget(sync_row)
 
@@ -253,6 +226,11 @@ class CalSciApp(QMainWindow):
         self.simulator_btn.setObjectName("btnSecondary")
         self.simulator_btn.clicked.connect(self._handle_launch_simulator)
         left_layout.addWidget(self.simulator_btn)
+
+        self.hybrid_simulator_btn = QPushButton("Hybrid Simulator")
+        self.hybrid_simulator_btn.setObjectName("btnSecondary")
+        self.hybrid_simulator_btn.clicked.connect(self._handle_hybrid_simulator)
+        left_layout.addWidget(self.hybrid_simulator_btn)
 
         self.auto_retry_cb = QCheckBox("Auto-retry on failure)")
         self.auto_retry_cb.setChecked(True)
@@ -395,6 +373,51 @@ class CalSciApp(QMainWindow):
                 border-color: #e95420;
             }
 
+            QCheckBox#inlineOptionCheckbox {
+                color: #a0a0a0;
+                font-size: 12px;
+                spacing: 8px;
+                margin-top: 0px;
+            }
+            QCheckBox#inlineOptionCheckbox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background: #2a2a2a;
+            }
+            QCheckBox#inlineOptionCheckbox::indicator:hover {
+                border-color: #777;
+                background: #333;
+            }
+            QCheckBox#inlineOptionCheckbox::indicator:checked {
+                background-color: #e95420;
+                border-color: #e95420;
+            }
+
+            QCheckBox#tripleTargetCheckbox {
+                color: #d0d0d0;
+                font-size: 12px;
+                spacing: 6px;
+                margin-top: 0px;
+                padding-top: 0px;
+            }
+            QCheckBox#tripleTargetCheckbox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #555;
+                border-radius: 4px;
+                background: #2a2a2a;
+            }
+            QCheckBox#tripleTargetCheckbox::indicator:hover {
+                border-color: #777;
+                background: #333;
+            }
+            QCheckBox#tripleTargetCheckbox::indicator:checked {
+                background-color: #e95420;
+                border-color: #e95420;
+            }
+
             QComboBox#syncSourceCombo {
                 background-color: #2a2a2a;
                 color: #dddddd;
@@ -481,206 +504,47 @@ class CalSciApp(QMainWindow):
     def _normalize_sync_source_path(self, path_str):
         return str(Path(path_str).expanduser().resolve())
 
-    def _sync_source_display_name(self, path_str):
-        if path_str == self._default_sync_source_path():
-            return f"{path_str} (default)"
-        if not Path(path_str).exists():
-            return f"{path_str} (missing)"
-        return path_str
+    def _set_cross_sync_checkbox_state(self, checked):
+        self.cross_sync_cb.blockSignals(True)
+        self.cross_sync_cb.setChecked(checked)
+        self.cross_sync_cb.blockSignals(False)
 
-    def _save_sync_sources(self):
-        payload = {
-            "sources": self._sync_sources,
-            "selected": self._selected_sync_source,
-        }
-        try:
-            SYNC_SOURCES_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except Exception as e:
-            self._log(f"Failed to save sync source settings: {e}", "warning")
+    def _initialize_sync_source_controls(self):
+        self._cross_sync_enabled = False
+        self._cross_sync_root = ""
+        self._set_cross_sync_checkbox_state(False)
+        self.cross_sync_cb.setToolTip("Sync source: default software folder")
 
-    def _refresh_sync_source_combo(self):
-        self.sync_source_combo.blockSignals(True)
-        self.sync_source_combo.clear()
-
-        for path_str in self._sync_sources:
-            self.sync_source_combo.addItem(self._sync_source_display_name(path_str), path_str)
-
-        if self._selected_sync_source in self._sync_sources:
-            idx = self._sync_sources.index(self._selected_sync_source)
-        else:
-            idx = 0
-            self._selected_sync_source = self._sync_sources[0] if self._sync_sources else None
-
-        sep_index = self.sync_source_combo.count()
-        self.sync_source_combo.addItem("──────────", self._sync_action_separator)
-        self.sync_source_combo.addItem("Add Local Folder...", self._sync_action_add)
-        self.sync_source_combo.addItem("Remove Current Folder...", self._sync_action_remove)
-
-        model = self.sync_source_combo.model()
-        sep_item = model.item(sep_index)
-        if sep_item is not None:
-            sep_item.setEnabled(False)
-
-        if idx >= 0 and self.sync_source_combo.count() > 0:
-            self.sync_source_combo.setCurrentIndex(idx)
-            selected = self.sync_source_combo.itemData(idx)
-            self.sync_source_combo.setToolTip(selected if selected else "")
-
-        self.sync_source_combo.blockSignals(False)
-        self._update_sync_source_controls()
-
-    def _load_sync_sources(self):
-        default_path = self._default_sync_source_path()
-        sources = [default_path]
-        selected = default_path
-        custom_count = 0
-
-        if SYNC_SOURCES_FILE.exists():
-            try:
-                raw = json.loads(SYNC_SOURCES_FILE.read_text(encoding="utf-8"))
-                raw_sources = raw.get("sources", [])
-                raw_selected = raw.get("selected", "")
-
-                if isinstance(raw_sources, list):
-                    for item in raw_sources:
-                        if not isinstance(item, str) or not item.strip():
-                            continue
-                        try:
-                            normalized = self._normalize_sync_source_path(item)
-                        except Exception:
-                            continue
-                        if normalized == default_path:
-                            continue
-                        if custom_count >= MAX_CUSTOM_SYNC_SOURCES:
-                            continue
-                        if normalized not in sources:
-                            sources.append(normalized)
-                            custom_count += 1
-
-                if isinstance(raw_selected, str) and raw_selected.strip():
-                    try:
-                        selected = self._normalize_sync_source_path(raw_selected)
-                    except Exception:
-                        selected = default_path
-            except Exception:
-                selected = default_path
-
-        if default_path not in sources:
-            sources.insert(0, default_path)
-        if selected not in sources:
-            selected = default_path
-
-        self._sync_sources = sources
-        self._selected_sync_source = selected
-        self._refresh_sync_source_combo()
-        self._save_sync_sources()
-
-    def _update_sync_source_controls(self):
-        if self.operation_in_progress:
-            return
-
-        default_path = self._default_sync_source_path()
-        current = self._selected_sync_source or default_path
-        custom_count = len([p for p in self._sync_sources if p != default_path])
-        can_add = custom_count < MAX_CUSTOM_SYNC_SOURCES
-        can_remove = current != default_path
-
-        model = self.sync_source_combo.model()
-        if model is None:
-            return
-
-        for i in range(self.sync_source_combo.count()):
-            data = self.sync_source_combo.itemData(i)
-            item = model.item(i)
-            if item is None:
-                continue
-            if data == self._sync_action_add:
-                label = "Add Local Folder..."
-                if not can_add:
-                    label = f"Add Local Folder... (max {MAX_CUSTOM_SYNC_SOURCES})"
-                self.sync_source_combo.setItemText(i, label)
-                item.setEnabled(can_add)
-            elif data == self._sync_action_remove:
-                item.setEnabled(can_remove)
-
-    def _on_sync_source_changed(self, index):
-        if index < 0:
-            return
-        selected = self.sync_source_combo.itemData(index)
-        if selected == self._sync_action_add:
-            self._handle_add_sync_source()
-            return
-        if selected == self._sync_action_remove:
-            self._handle_remove_sync_source()
-            return
-        if selected == self._sync_action_separator:
-            self._refresh_sync_source_combo()
-            return
-        if not selected:
-            return
-        self._selected_sync_source = selected
-        self.sync_source_combo.setToolTip(selected)
-        self._save_sync_sources()
-        self._update_sync_source_controls()
-
-    def _handle_add_sync_source(self):
-        default_path = self._default_sync_source_path()
-        custom_count = len([p for p in self._sync_sources if p != default_path])
-        if custom_count >= MAX_CUSTOM_SYNC_SOURCES:
-            self._log(
-                f"Only {MAX_CUSTOM_SYNC_SOURCES} custom sync folders are allowed. Remove one to add another.",
-                "warning",
+    def _on_cross_sync_toggled(self, checked):
+        if checked:
+            start_dir = self._cross_sync_root or str(Path.home())
+            selected = QFileDialog.getExistingDirectory(
+                self,
+                "Select Cross Software Folder",
+                start_dir,
             )
-            self._refresh_sync_source_combo()
-            return
+            if not selected:
+                self._cross_sync_enabled = False
+                self._cross_sync_root = ""
+                self._set_cross_sync_checkbox_state(False)
+                self.cross_sync_cb.setToolTip("Sync source: default software folder")
+                self._log("Cross software folder selection cancelled", "info")
+                return
 
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Select Sync Source Folder",
-            str(Path.home())
-        )
-        if not selected:
-            self._refresh_sync_source_combo()
-            return
-
-        try:
             normalized = self._normalize_sync_source_path(selected)
-        except Exception as e:
-            self._log(f"Invalid folder: {e}", "error")
-            self._refresh_sync_source_combo()
-            return
-
-        if normalized not in self._sync_sources:
-            self._sync_sources.append(normalized)
-            self._log(f"Added sync folder: {normalized}", "success")
+            self._cross_sync_enabled = True
+            self._cross_sync_root = normalized
+            self.cross_sync_cb.setToolTip(f"Cross software folder: {normalized}")
+            self._log(f"Cross software folder selected: {normalized}", "success")
         else:
-            self._log(f"Sync folder already exists: {normalized}", "info")
-
-        self._selected_sync_source = normalized
-        self._refresh_sync_source_combo()
-        self._save_sync_sources()
-
-    def _handle_remove_sync_source(self):
-        current = self._selected_sync_source or self._default_sync_source_path()
-        default_path = self._default_sync_source_path()
-
-        if current == default_path:
-            self._log("Default sync folder cannot be removed", "warning")
-            self._refresh_sync_source_combo()
-            return
-
-        if current in self._sync_sources:
-            self._sync_sources.remove(current)
-            self._selected_sync_source = default_path
-            self._refresh_sync_source_combo()
-            self._save_sync_sources()
-            self._log(f"Removed sync folder: {current}", "info")
-            return
-
-        self._refresh_sync_source_combo()
+            if self._cross_sync_enabled or self._cross_sync_root:
+                self._log("Cross software folder disabled", "info")
+            self._cross_sync_enabled = False
+            self._cross_sync_root = ""
+            self.cross_sync_cb.setToolTip("Sync source: default software folder")
 
     def _get_selected_sync_root(self):
-        selected = self._selected_sync_source or self._default_sync_source_path()
+        selected = self._cross_sync_root if self._cross_sync_enabled else self._default_sync_source_path()
         root = Path(selected)
         if not root.exists():
             self._log(f"Selected sync folder not found: {root}", "error")
@@ -690,34 +554,45 @@ class CalSciApp(QMainWindow):
             return None
         return root
 
-    def _normalize_firmware_path(self, path_str):
+    def _normalize_folder_path(self, path_str):
         return str(Path(path_str).expanduser().resolve())
 
-    def _triple_firmware_option_text(self, key):
+    def _triple_target_name(self, key):
         names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
         return names[key]
 
-    def _triple_firmware_path_display_name(self, key):
-        labels = {"mpy": "mpy", "cpp": "cpp", "rust": "rust"}
-        current = self._triple_fw_paths.get(key, "")
-        if not current:
-            return f"{labels[key]} path:"
-        return f"{labels[key]} path: {current}"
+    def _set_triple_checkbox_state(self, key, checked):
+        checkbox = self._triple_checkboxes.get(key)
+        if checkbox is None:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setChecked(checked)
+        checkbox.blockSignals(False)
 
-    def _triple_flash_targets_summary(self):
-        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
-        active = [names[k] for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
-        if not active:
-            return "Targets: None (Full Triple Boot)"
-        return "Targets: " + ", ".join(active)
+    def _refresh_triple_target_tooltips(self):
+        for key, checkbox in self._triple_checkboxes.items():
+            selected_path = self._triple_fw_paths.get(key, "")
+            target_name = self._triple_target_name(key)
+            if selected_path:
+                checkbox.setToolTip(f"{target_name} file: {selected_path}")
+            else:
+                checkbox.setToolTip(f"Select {target_name} firmware file")
+
+    def _initialize_triple_firmware_controls(self):
+        self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
+        self._selected_triple_flash_keys = set()
+        for key in ("mpy", "cpp", "rust"):
+            self._set_triple_checkbox_state(key, False)
+        self._refresh_triple_target_tooltips()
 
     def _update_triple_flash_button_state(self):
-        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
-        active = [names[k] for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
-        if active:
+        active_keys = [k for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
+        if active_keys:
+            active_names = [self._triple_target_name(k) for k in active_keys]
             self.flash_triple_btn.setText("Flash")
             self.flash_triple_btn.setToolTip(
-                f"Flash selected firmware only (no erase): {', '.join(active)}"
+                "Flash selected firmware only (no erase): "
+                + ", ".join(active_names)
             )
         else:
             self.flash_triple_btn.setText("Flash Triple Boot")
@@ -725,205 +600,63 @@ class CalSciApp(QMainWindow):
                 "Erase + flash bootloader/partition/ota data + all 3 firmware images"
             )
 
-    def _save_triple_firmware_paths(self):
-        payload = {k: self._triple_fw_paths.get(k, "") for k in ("mpy", "cpp", "rust")}
-        try:
-            TRIPLE_FIRMWARE_PATHS_FILE.write_text(
-                json.dumps(payload, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            self._log(f"Failed to save triple firmware paths: {e}", "warning")
-
-    def _refresh_triple_firmware_combo(self):
-        self.triple_fw_combo.blockSignals(True)
-        self.triple_fw_combo.clear()
-        self._triple_fw_key_by_index = {}
-
-        # Summary row (non-selectable)
-        self.triple_fw_combo.addItem(self._triple_flash_targets_summary(), self._triple_combo_summary_key)
-        self._triple_fw_key_by_index[0] = self._triple_combo_summary_key
-
-        # Checkable target rows
-        for idx, key in enumerate(("mpy", "cpp", "rust"), start=1):
-            self.triple_fw_combo.addItem(self._triple_firmware_option_text(key), key)
-            self._triple_fw_key_by_index[idx] = key
-            checked = key in self._selected_triple_flash_keys
-            self.triple_fw_combo.setItemData(
-                idx,
-                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
-                Qt.ItemDataRole.CheckStateRole,
-            )
-            model = self.triple_fw_combo.model()
-            item = model.item(idx) if hasattr(model, "item") else None
-            if item is not None:
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-
-        # Separator row
-        sep_idx = self.triple_fw_combo.count()
-        self.triple_fw_combo.addItem("──────────", self._triple_combo_separator_key)
-        self._triple_fw_key_by_index[sep_idx] = self._triple_combo_separator_key
-
-        # Path actions + clear action
-        model = self.triple_fw_combo.model()
-        path_action_rows = []
-        for key in ("mpy", "cpp", "rust"):
-            label = self._triple_firmware_path_display_name(key)
-            path_action_rows.append((label, self._triple_action_set_path[key], key))
-
-        action_rows = path_action_rows + [
-            ("Clear Firmware Targets (all unchecked)", self._triple_action_clear_targets, None),
-            ("Close Menu (X)", self._triple_action_close_menu, None),
-        ]
-        has_selection = bool(self._selected_triple_flash_keys)
-        for label, action_key, target_key in action_rows:
-            idx = self.triple_fw_combo.count()
-            self.triple_fw_combo.addItem(label, action_key)
-            self._triple_fw_key_by_index[idx] = action_key
-            item = model.item(idx) if hasattr(model, "item") else None
-            if item is not None and target_key is not None:
-                flags = item.flags() | Qt.ItemFlag.ItemIsSelectable
-                is_active = (not has_selection) or (target_key in self._selected_triple_flash_keys)
-                if is_active:
-                    flags |= Qt.ItemFlag.ItemIsEnabled
-                else:
-                    flags &= ~Qt.ItemFlag.ItemIsEnabled
-                item.setFlags(flags)
-
-                active_color = QColor("#dddddd")
-                disabled_color = QColor("#dddddd")
-                disabled_color.setAlphaF(0.90)
-                self.triple_fw_combo.setItemData(
-                    idx,
-                    active_color if is_active else disabled_color,
-                    Qt.ItemDataRole.ForegroundRole,
-                )
-
-        summary_item = model.item(0) if hasattr(model, "item") else None
-        if summary_item is not None:
-            summary_item.setEnabled(False)
-        sep_item = model.item(sep_idx) if hasattr(model, "item") else None
-        if sep_item is not None:
-            sep_item.setEnabled(False)
-
-        self.triple_fw_combo.setCurrentIndex(0)
-
-        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
-        tooltip_lines = []
-        for key in ("mpy", "cpp", "rust"):
-            value = self._triple_fw_paths.get(key, "")
-            if value:
-                tooltip_lines.append(f"{names[key]}: {value}")
-            else:
-                tooltip_lines.append(f"{names[key]}: auto")
-        active = [names[k] for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
-        if active:
-            tooltip_lines.append(f"Flash mode: selected only ({', '.join(active)})")
-        else:
-            tooltip_lines.append("Flash mode: full triple-boot")
-        tooltip_lines.append("Use checkbox rows to select firmware targets")
-        self.triple_fw_combo.setToolTip("\n".join(tooltip_lines))
-        self.triple_fw_combo.blockSignals(False)
-        self._update_triple_flash_button_state()
-
-    def _load_triple_firmware_paths(self):
-        loaded = {"mpy": "", "cpp": "", "rust": ""}
-        if TRIPLE_FIRMWARE_PATHS_FILE.exists():
-            try:
-                raw = json.loads(TRIPLE_FIRMWARE_PATHS_FILE.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    for key in loaded:
-                        value = raw.get(key, "")
-                        if isinstance(value, str) and value.strip():
-                            try:
-                                loaded[key] = self._normalize_firmware_path(value)
-                            except Exception:
-                                loaded[key] = value
-            except Exception:
-                pass
-        self._triple_fw_paths = loaded
-        self._selected_triple_flash_keys = set()
-        self._refresh_triple_firmware_combo()
-        self._save_triple_firmware_paths()
-
-    def _keep_triple_firmware_popup_open(self):
-        if self.triple_fw_combo.isEnabled():
-            QTimer.singleShot(0, self.triple_fw_combo.showPopup)
-
-    def _on_triple_firmware_option_activated(self, index):
-        key = self._triple_fw_key_by_index.get(index)
-        if key in {self._triple_combo_summary_key, self._triple_combo_separator_key, None}:
-            return
-
-        if key in {"mpy", "cpp", "rust"}:
-            if key in self._selected_triple_flash_keys:
-                self._selected_triple_flash_keys.remove(key)
-            else:
-                self._selected_triple_flash_keys.add(key)
-            self._refresh_triple_firmware_combo()
-            self._keep_triple_firmware_popup_open()
-            if self._selected_triple_flash_keys:
-                active = [k.upper() for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
-                self._log(f"Selected firmware targets: {', '.join(active)}", "info")
-            else:
-                self._log("No firmware target selected: full Triple Boot mode", "info")
-            return
-
-        if key == self._triple_action_clear_targets:
-            self._selected_triple_flash_keys = set()
-            self._refresh_triple_firmware_combo()
-            self._keep_triple_firmware_popup_open()
-            self._log("Firmware targets cleared (full Triple Boot mode)", "info")
-            return
-
-        if key == self._triple_action_close_menu:
-            self.triple_fw_combo.close_popup_explicitly()
-            self._log("Firmware menu closed", "info")
-            return
-
-        names = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
-        filters = {
-            "mpy": "Firmware files (*.bin);;All files (*)",
-            "cpp": "Firmware files (*.bin);;All files (*)",
-            "rust": "Firmware files (*.bin *.elf);;All files (*)",
-        }
-        action_to_key = {v: k for k, v in self._triple_action_set_path.items()}
-        target_key = action_to_key.get(key)
+    def _on_triple_target_toggled(self, target_key, checked):
         if target_key not in {"mpy", "cpp", "rust"}:
             return
-        if self._selected_triple_flash_keys and target_key not in self._selected_triple_flash_keys:
-            self._keep_triple_firmware_popup_open()
-            self._log(
-                f"{names[target_key]} path is locked while other target(s) are selected.",
-                "warning",
+
+        target_name = self._triple_target_name(target_key)
+        if checked:
+            filters = {
+                "mpy": "Firmware files (*.bin);;All files (*)",
+                "cpp": "Firmware files (*.bin);;All files (*)",
+                "rust": "Firmware files (*.bin *.elf);;All files (*)",
+            }
+            current = self._triple_fw_paths.get(target_key, "").strip()
+            if current:
+                current_path = Path(current)
+                if current_path.exists() and current_path.is_file():
+                    start_path = str(current_path.parent)
+                else:
+                    start_path = str(current_path)
+            else:
+                start_path = str(TRIPLE_ARTIFACTS_DIR if TRIPLE_ARTIFACTS_DIR.exists() else Path.home())
+
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Select {target_name} Firmware File",
+                start_path,
+                filters[target_key],
             )
-            return
+            if not selected:
+                self._set_triple_checkbox_state(target_key, False)
+                self._selected_triple_flash_keys.discard(target_key)
+                self._triple_fw_paths[target_key] = ""
+                self._refresh_triple_target_tooltips()
+                self._update_triple_flash_button_state()
+                self._log(f"{target_name} firmware file selection cancelled", "info")
+                return
 
-        current = self._triple_fw_paths.get(target_key, "")
-        if current:
-            start = Path(current)
-            start_dir = str(start.parent if start.exists() else start.parent)
+            normalized = self._normalize_folder_path(selected)
+            self._triple_fw_paths[target_key] = normalized
+            self._selected_triple_flash_keys.add(target_key)
+            self._refresh_triple_target_tooltips()
+            self._update_triple_flash_button_state()
+            self._log(f"{target_name} firmware file selected: {normalized}", "success")
         else:
-            start_dir = str(TRIPLE_ARTIFACTS_DIR)
+            self._selected_triple_flash_keys.discard(target_key)
+            self._triple_fw_paths[target_key] = ""
+            self._refresh_triple_target_tooltips()
+            self._update_triple_flash_button_state()
 
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Select {names[target_key]} Firmware",
-            start_dir,
-            filters[target_key],
-        )
-        if not selected:
-            self._refresh_triple_firmware_combo()
-            self._keep_triple_firmware_popup_open()
-            self._log(f"Path selection cancelled for {names[target_key]}", "info")
-            return
-
-        normalized = self._normalize_firmware_path(selected)
-        self._triple_fw_paths[target_key] = normalized
-        self._save_triple_firmware_paths()
-        self._refresh_triple_firmware_combo()
-        self._keep_triple_firmware_popup_open()
-        self._log(f"Custom {names[target_key]} firmware path set: {normalized}", "success")
+        if self._selected_triple_flash_keys:
+            active = [
+                self._triple_target_name(k)
+                for k in ("mpy", "cpp", "rust")
+                if k in self._selected_triple_flash_keys
+            ]
+            self._log(f"Selected firmware targets: {', '.join(active)}", "info")
+        else:
+            self._log("No firmware target selected: full Triple Boot mode", "info")
 
     def _resolve_candidate_path(self, label, candidates, log_found=True):
         checked = []
@@ -998,46 +731,102 @@ class CalSciApp(QMainWindow):
             TRIPLE_RUST_ELF_SOURCE_CANDIDATES,
         )
 
-    def _resolve_triple_boot_images(self):
+    def _resolve_custom_triple_image_path(self, target_key, selected_path):
+        path = Path(selected_path)
+        if not path.exists():
+            raise MicroPyError(f"{self._triple_target_name(target_key)} file/folder not found: {path}")
+
+        if path.is_file():
+            self._log(f"{self._triple_target_name(target_key)} image (selected file): {path}", "info")
+            return path
+
+        if not path.is_dir():
+            raise MicroPyError(f"{self._triple_target_name(target_key)} path is invalid: {path}")
+
+        preferred_names = {
+            "mpy": ("micropython.bin", "micropython_s3.bin"),
+            "cpp": ("cpp_app.bin", "dino_cpp_ota.bin"),
+            "rust": ("rust_app.bin", "rust.bin", "rust_app.elf", "rust.elf"),
+        }
+        allowed_exts = {
+            "mpy": (".bin",),
+            "cpp": (".bin",),
+            "rust": (".bin", ".elf"),
+        }
+
+        def _dedupe(paths):
+            unique = {}
+            for candidate_path in paths:
+                if candidate_path.is_file():
+                    unique[str(candidate_path.resolve())] = candidate_path
+            return list(unique.values())
+
+        named_matches = []
+        for filename in preferred_names[target_key]:
+            direct = path / filename
+            if direct.exists():
+                named_matches.append(direct)
+            named_matches.extend(path.rglob(filename))
+        candidates = _dedupe(named_matches)
+
+        if not candidates:
+            ext_matches = []
+            for ext in allowed_exts[target_key]:
+                ext_matches.extend(path.rglob(f"*{ext}"))
+            candidates = _dedupe(ext_matches)
+
+        if not candidates:
+            expected = ", ".join(preferred_names[target_key])
+            raise MicroPyError(
+                f"No {self._triple_target_name(target_key)} firmware image found in {path}. "
+                f"Expected one of: {expected}"
+            )
+
+        chosen = sorted(
+            candidates,
+            key=lambda p: (p.stat().st_mtime, str(p)),
+            reverse=True,
+        )[0]
+        self._log(f"{self._triple_target_name(target_key)} image (selected folder): {chosen}", "info")
+        return chosen
+
+    def _resolve_triple_boot_images(self, selected_keys=None):
+        selected_set = set(selected_keys or [])
+        full_flash = not selected_set
+
         self._refresh_local_triple_boot_artifacts()
-        bootloader = self._resolve_candidate_path("Bootloader image", TRIPLE_BOOTLOADER_CANDIDATES)
-        partition_table = self._resolve_candidate_path(
-            "Partition table image",
-            TRIPLE_PARTITION_TABLE_CANDIDATES,
-        )
-        otadata = self._resolve_candidate_path("OTA data image", TRIPLE_OTADATA_CANDIDATES)
-        custom_mpy = self._triple_fw_paths.get("mpy", "").strip()
-        custom_cpp = self._triple_fw_paths.get("cpp", "").strip()
-        custom_rust = self._triple_fw_paths.get("rust", "").strip()
 
-        if custom_mpy:
-            micropython = Path(custom_mpy)
-            if not micropython.exists():
-                raise MicroPyError(f"Custom MicroPython image not found: {micropython}")
-            self._log(f"MicroPython image (custom): {micropython}", "info")
-        else:
+        bootloader = None
+        partition_table = None
+        otadata = None
+        if full_flash:
+            bootloader = self._resolve_candidate_path("Bootloader image", TRIPLE_BOOTLOADER_CANDIDATES)
+            partition_table = self._resolve_candidate_path(
+                "Partition table image",
+                TRIPLE_PARTITION_TABLE_CANDIDATES,
+            )
+            otadata = self._resolve_candidate_path("OTA data image", TRIPLE_OTADATA_CANDIDATES)
+
+        micropython = None
+        if full_flash:
             micropython = self._resolve_candidate_path("MicroPython image", TRIPLE_MPY_CANDIDATES)
+        elif "mpy" in selected_set:
+            custom_mpy_path = self._triple_fw_paths.get("mpy", "").strip()
+            if not custom_mpy_path:
+                raise MicroPyError("MicroPython file not selected")
+            micropython = self._resolve_custom_triple_image_path("mpy", custom_mpy_path)
 
-        if custom_cpp:
-            cpp = Path(custom_cpp)
-            if not cpp.exists():
-                raise MicroPyError(f"Custom C++ image not found: {cpp}")
-            self._log(f"C++ image (custom): {cpp}", "info")
-        else:
+        cpp = None
+        if full_flash:
             cpp = self._resolve_candidate_path("C++ image", TRIPLE_CPP_CANDIDATES)
+        elif "cpp" in selected_set:
+            custom_cpp_path = self._triple_fw_paths.get("cpp", "").strip()
+            if not custom_cpp_path:
+                raise MicroPyError("C++ file not selected")
+            cpp = self._resolve_custom_triple_image_path("cpp", custom_cpp_path)
 
-        if custom_rust:
-            rust_custom_path = Path(custom_rust)
-            if not rust_custom_path.exists():
-                raise MicroPyError(f"Custom Rust image not found: {rust_custom_path}")
-            if rust_custom_path.suffix.lower() == ".bin":
-                rust_bin = rust_custom_path
-                self._log(f"Rust image (custom bin): {rust_bin}", "info")
-            else:
-                self._log("Custom Rust image is not .bin. Generating .bin from custom ELF…", "warning")
-                rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
-                generate_esp_image_from_elf(rust_custom_path, rust_bin, log_func=self._log)
-        else:
+        rust_bin = None
+        if full_flash:
             try:
                 rust_bin = self._resolve_candidate_path("Rust image", TRIPLE_RUST_BIN_CANDIDATES)
             except MicroPyError:
@@ -1045,6 +834,17 @@ class CalSciApp(QMainWindow):
                 self._log("Rust BIN not found. Generating from ELF…", "warning")
                 rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
                 generate_esp_image_from_elf(rust_elf, rust_bin, log_func=self._log)
+        elif "rust" in selected_set:
+            custom_rust_path = self._triple_fw_paths.get("rust", "").strip()
+            if not custom_rust_path:
+                raise MicroPyError("Rust file not selected")
+            rust_image = self._resolve_custom_triple_image_path("rust", custom_rust_path)
+            if rust_image.suffix.lower() == ".bin":
+                rust_bin = rust_image
+            else:
+                self._log("Custom Rust image is ELF. Generating BIN…", "warning")
+                rust_bin = Path(TRIPLE_LOCAL_RUST_BIN)
+                generate_esp_image_from_elf(rust_image, rust_bin, log_func=self._log)
 
         return {
             "bootloader": bootloader,
@@ -1083,10 +883,18 @@ class CalSciApp(QMainWindow):
         }
         color = color_map.get(msg_type, "#c0c0c0")
         timestamp = time.strftime("%H:%M:%S")
+        # Table layout: timestamp left (no wrap), message right (wraps) - reliable in QTextEdit
         html = (
-            f'<span style="color:#555;">[{timestamp}]</span> '
-            f'<span style="color:{color};">{message}</span><br>'
+            f'<table style="width:100%; border-collapse: collapse; margin: 0; padding: 0;">'
+            f'<tr style="margin: 0; padding: 0;">'
+            f'<td style="color:#555; white-space: nowrap; padding: 0 8px 0 0; vertical-align: top;">[{timestamp}]</td>'
+            f'<td style="color:{color}; word-wrap: break-word; padding: 0;">{message}</td>'
+            f'</tr></table>'
         )
+
+        # Save scrollbar position (no auto-scroll)
+        scrollbar = self.log_panel.verticalScrollBar()
+        scroll_pos = scrollbar.value()
 
         # Save current selection if any
         cursor = self.log_panel.textCursor()
@@ -1095,20 +903,19 @@ class CalSciApp(QMainWindow):
             selection_start = cursor.selectionStart()
             selection_end = cursor.selectionEnd()
 
-        # Always insert at the end
+        # Insert at the end without moving view
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.log_panel.setTextCursor(cursor)
         self.log_panel.insertHtml(html)
 
-        # Restore selection or auto-scroll
+        # Restore selection
         if had_selection:
-            # Restore the previous selection
             cursor.setPosition(selection_start)
             cursor.setPosition(selection_end, QTextCursor.MoveMode.KeepAnchor)
             self.log_panel.setTextCursor(cursor)
-        else:
-            # Auto-scroll to end
-            self.log_panel.moveCursor(QTextCursor.MoveOperation.End)
+
+        # Restore scrollbar position
+        scrollbar.setValue(scroll_pos)
 
         self.current_file_label.setText(message)
 
@@ -1118,16 +925,16 @@ class CalSciApp(QMainWindow):
     def _on_operation_done(self):
         self.operation_in_progress = False
         self.update_btn.setEnabled(True)
-        self.flash_btn.setEnabled(True)
         self.flash_triple_btn.setEnabled(True)
-        self.triple_fw_combo.setEnabled(True)
+        for checkbox in self._triple_checkboxes.values():
+            checkbox.setEnabled(True)
         self.delta_btn.setEnabled(True)
-        self.sync_source_combo.setEnabled(True)
+        self.cross_sync_cb.setEnabled(True)
         self.upload_custom_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.clear_btn.setEnabled(True)
         self.simulator_btn.setEnabled(True)
-        self._update_sync_source_controls()
+        self.hybrid_simulator_btn.setEnabled(True)
         self._check_device_status()
 
     def _ensure_window_sequence(self, action_label):
@@ -1147,15 +954,16 @@ class CalSciApp(QMainWindow):
     def _lock_buttons(self):
         self.operation_in_progress = True
         self.update_btn.setEnabled(False)
-        self.flash_btn.setEnabled(False)
         self.flash_triple_btn.setEnabled(False)
-        self.triple_fw_combo.setEnabled(False)
+        for checkbox in self._triple_checkboxes.values():
+            checkbox.setEnabled(False)
         self.delta_btn.setEnabled(False)
-        self.sync_source_combo.setEnabled(False)
+        self.cross_sync_cb.setEnabled(False)
         self.upload_custom_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
         self.simulator_btn.setEnabled(False)
+        self.hybrid_simulator_btn.setEnabled(False)
         self.progress_bar.setValue(0)
 
     def _log(self, message, msg_type="info"):
@@ -1186,22 +994,100 @@ class CalSciApp(QMainWindow):
         self._lock_buttons()
 
         def run():
+            flasher = None
             try:
-                # First, delete the existing repository
+                # Phase 1: Git clone
                 self._log("Deleting existing repository…", "info")
-                self.bridge.progress_signal.emit(0.1)
+                self.bridge.progress_signal.emit(0.05)
                 delete_repo(self._log)
 
-                # Then clone fresh from remote
                 self._log("Cloning repository fresh…", "info")
-                self.bridge.progress_signal.emit(0.4)
+                self.bridge.progress_signal.emit(0.3)
                 ensure_repo(self._log)
 
                 self._log("Repository updated successfully ✓", "success")
+
+                # Determine progress for next phase
+                if self.update_with_fw_cb.isChecked():
+                    self.bridge.progress_signal.emit(0.40)
+
+                    # Phase 2: Firmware flash (30%)
+                    ports = find_esp32_ports()
+                    if not ports:
+                        raise RuntimeError("No CalSci device detected")
+                    port = ports[0]
+                    self._log(f"CalSci found: {port}", "success")
+                    self.bridge.progress_signal.emit(0.45)
+                    self._log("Flashing firmware…", "info")
+                    port = flash_firmware(port, FIRMWARE_BIN, log_func=self._log, enter_bootloader=False)
+                    self._log("Firmware flashed ✓", "success")
+                    self.bridge.progress_signal.emit(0.70)
+
+                    # Device is rebooting, wait for it to be ready
+                    self._log("Waiting for CalSci to boot…", "info")
+                    time.sleep(3)
+
+                    # Re-scan port after firmware flash
+                    ports = find_esp32_ports()
+                    if not ports:
+                        raise RuntimeError("CalSci not detected after firmware flash")
+                    port = ports[0]
+                else:
+                    self.bridge.progress_signal.emit(0.60)
+                    ports = find_esp32_ports()
+                    if not ports:
+                        raise RuntimeError("No CalSci device detected")
+                    port = ports[0]
+                    self._log(f"CalSci found: {port}", "success")
+                    self.bridge.progress_signal.emit(0.70)
+
+                # Phase 3: Clear all files
+                self._log("Clearing all files from CalSci…", "warning")
+                flasher = MicroPyFlasher(port)
+                flasher.clean_all(self._log)
+                self.bridge.progress_signal.emit(0.75)
+
+                # Phase 4: Upload all files fresh
+                sync_root = ROOT
+                local_files = get_all_files(sync_root)
+                if local_files:
+                    self._log(f"Uploading {len(local_files)} file(s)…", "info")
+                    flasher.sync_folder_structure(local_files, self._log, root_path=sync_root)
+
+                    total_size = max(sum(p.stat().st_size for p in local_files), 1)
+                    uploaded_size = 0
+                    auto_retry = self.auto_retry_cb.isChecked()
+
+                    for i, local_path in enumerate(sorted(local_files), 1):
+                        remote_rel = "/" + local_path.relative_to(sync_root).as_posix()
+                        flasher, success = self._upload_single_file(
+                            flasher, port, local_path, remote_rel, auto_retry,
+                            ensure_dirs=False, use_raw=True
+                        )
+                        if success:
+                            uploaded_size += max(local_path.stat().st_size, 1)
+                            progress = 0.75 + (uploaded_size / total_size) * 0.25
+                            self.bridge.progress_signal.emit(progress)
+                            self._log(f"  [{i}/{len(local_files)}] ⬆  {remote_rel}  ({local_path.stat().st_size} bytes)", "info")
+                        else:
+                            self._log(f"  [{i}/{len(local_files)}] Failed: {remote_rel}", "warning")
+
+                    self._log("All files uploaded ✓", "success")
+                else:
+                    self._log("No files to upload", "info")
+
+                if flasher:
+                    flasher.close()
                 self.bridge.progress_signal.emit(1.0)
+
             except Exception as e:
                 self._log(f"Error: {e}", "error")
                 self.bridge.progress_signal.emit(0.0)
+                if flasher:
+                    try:
+                        flasher.close()
+                    except:
+                        pass
             finally:
                 self.bridge.operation_done_signal.emit()
 
@@ -1352,90 +1238,6 @@ class CalSciApp(QMainWindow):
                 self.bridge.operation_done_signal.emit()
 
         threading.Thread(target=run, daemon=True).start()
-
-    def _handle_flash(self):
-        self._lock_buttons()
-
-        def run():
-            try:
-                ports = find_esp32_ports()
-                if not ports:
-                    raise RuntimeError("No CalSci device detected")
-
-                port = ports[0]
-                self._log(f"CalSci found: {port}", "success")
-                self.bridge.progress_signal.emit(0.05)
-
-                if self.flash_fw_cb.isChecked():
-                    self._log("Press and hold BOOT, then tap RESET to enter bootloader mode.", "warning")
-                    port = confirm_bootloader(port, log_func=self._log)
-                    self._log("Starting erase + flash in 3 seconds…", "info")
-                    for remaining in range(3, 0, -1):
-                        self._log(f"  Starting erase/flash in {remaining}s", "info")
-                        time.sleep(1)
-                    self._log(f"Erasing + flashing firmware: {FIRMWARE_BIN.name}", "info")
-                    port = flash_firmware(port, FIRMWARE_BIN, log_func=self._log, enter_bootloader=False)
-                    self._log("Reset CalSci now.", "warning")
-                    port = wait_for_reset_signal(port, log_func=self._log)
-                    self._log("Starting upload in 3 seconds…", "info")
-                    for remaining in range(3, 0, -1):
-                        self._log(f"  Starting upload in {remaining}s", "info")
-                        time.sleep(1)
-
-                flasher = MicroPyFlasher(port)
-                # self._log("Clearing all files from ESP32...", "warning")
-                # flasher.clean_all(self._log)
-                # self._log("All files cleared", "success")
-                
-                files = get_all_files(ROOT)
-
-                if not files:
-                    self._log("No files to upload", "info")
-                    return
-
-                flasher.sync_folder_structure(files, self._log, root_path=ROOT)
-                self.bridge.progress_signal.emit(0.05)
-
-                total_size = max(sum(p.stat().st_size for p in files), 1)
-                uploaded = 0
-                failed_files = []
-                auto_retry = self.auto_retry_cb.isChecked()
-
-                self._log(f"Uploading {len(files)} files…", "info")
-
-                for i, path in enumerate(files, 1):
-                    remote_path = path.relative_to(ROOT).as_posix()
-
-                    flasher, success = self._upload_single_file(
-                        flasher, port, path, remote_path, auto_retry,
-                        ensure_dirs=False, use_raw=True
-                    )
-
-                    if success:
-                        uploaded += max(path.stat().st_size, 1)
-                        self.bridge.progress_signal.emit(0.1 + (uploaded / total_size) * 0.9)
-                        self._log(f"[{i}/{len(files)}] {path.name}", "info")
-                    else:
-                        failed_files.append(path.name)
-                        self._log(f"⚠ Skipped: {path.name}", "warning")
-
-                flasher.exit_raw_repl()
-                flasher.close()
-
-                if failed_files:
-                    self._log(f"Done with {len(failed_files)} failure(s)", "warning")
-                else:
-                    self._log("Flash complete ✓", "success")
-                    self.bridge.progress_signal.emit(1.0)
-
-            except Exception as e:
-                self._log(f"Error: {str(e)[:80]}", "error")
-                self.bridge.progress_signal.emit(0.0)
-            finally:
-                self.bridge.operation_done_signal.emit()
-
-        threading.Thread(target=run, daemon=True).start()
-
     def _handle_flash_tripleboot(self):
         if not self._ensure_window_sequence("flashing triple-boot firmware"):
             return
@@ -1497,7 +1299,7 @@ class CalSciApp(QMainWindow):
 
                 port = ports[0]
                 self._log(f"CalSci found: {port}", "success")
-                images = self._resolve_triple_boot_images()
+                images = self._resolve_triple_boot_images(selected_keys=selected_keys)
                 self.bridge.progress_signal.emit(0.20)
 
                 if not selected_keys:
@@ -1738,6 +1540,27 @@ class CalSciApp(QMainWindow):
         except Exception as e:
             self.simulator_process = None
             self._log(f"Failed to launch simulator: {e}", "error")
+
+    def _handle_hybrid_simulator(self):
+        """Launch hybrid simulator window connected to real hardware device."""
+        if not self._ensure_window_sequence("launching hybrid simulator"):
+            return
+
+        try:
+            ports = find_esp32_ports()
+            if not ports:
+                self._log("No CalSci device detected", "error")
+                return
+            port = ports[0]
+            self._log(f"CalSci found on {port}", "success")
+
+            # Import and show hybrid simulator window
+            from hybrid_simulator_window import HybridSimulatorWindow
+            self.hybrid_win = HybridSimulatorWindow(port)
+            self.hybrid_win.show()
+            self._log("Hybrid Simulator window opened", "success")
+        except Exception as e:
+            self._log(f"Failed to launch hybrid simulator: {e}", "error")
 
     def _handle_delete_selected(self):
         if not self._ensure_window_sequence("opening the delete dialog"):

@@ -1,5 +1,5 @@
 {
   "mpy": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/micropython.bin",
-  "cpp": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/cpp_app.bin",
+  "cpp": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/dino_cpp_ota.bin",
   "rust": "/home/rupesh/calsci/CalSci_Desktop_Software /triple_boot_images/rust_app.bin"
 }
