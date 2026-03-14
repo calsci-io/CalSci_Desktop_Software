@@ -1415,6 +1415,7 @@ class ESP32FileBrowser(QMainWindow):
         self.terminal_xterm_proc = None
         self._terminal_stopping = False
         self._terminal_start_mode = None
+        self._terminal_active_mode = None
         self._terminal_external = False
         self._terminal_host_native_ready = False
         self._normal_size = QSize(1200, 800)
@@ -3019,13 +3020,27 @@ class ESP32FileBrowser(QMainWindow):
             and self.terminal_xterm_proc.state() != QProcess.ProcessState.NotRunning
         )
 
+    def _claim_device_repl_mode(self):
+        owner = self.parent()
+        if owner and hasattr(owner, "_claim_device_mode"):
+            return owner._claim_device_mode("repl", "mpremote REPL")
+        return True
+
+    def _release_device_repl_mode(self):
+        owner = self.parent()
+        if owner and hasattr(owner, "_release_device_mode"):
+            owner._release_device_mode("repl")
+
     def _start_terminal_shell(self):
         """Start an embedded login shell in the terminal tab."""
         self._start_embedded_terminal(mode="shell")
 
     def _start_terminal_mpremote(self):
         """Start embedded mpremote REPL for the selected serial port."""
-        self._start_embedded_terminal(mode="mpremote")
+        if not self._claim_device_repl_mode():
+            return
+        if not self._start_embedded_terminal(mode="mpremote"):
+            self._release_device_repl_mode()
 
     def _start_external_terminal(self, mode="shell", xterm_path=None):
         """Launch xterm as a separate native window (Wayland-safe fallback)."""
@@ -3083,6 +3098,7 @@ class ESP32FileBrowser(QMainWindow):
             return False
 
         self._set_terminal_running_ui(True)
+        self._terminal_active_mode = mode
         self._set_terminal_status(start_message)
         return True
 
@@ -3166,6 +3182,7 @@ class ESP32FileBrowser(QMainWindow):
                 return False
 
             self._set_terminal_running_ui(True)
+            self._terminal_active_mode = mode
             self._set_terminal_status(start_message)
             return True
         finally:
@@ -3193,6 +3210,9 @@ class ESP32FileBrowser(QMainWindow):
 
         self.terminal_xterm_proc = None
         self._terminal_external = False
+        if self._terminal_active_mode == "mpremote":
+            self._release_device_repl_mode()
+        self._terminal_active_mode = None
         self._set_terminal_running_ui(False)
         self._terminal_stopping = False
         if not quiet:
@@ -3204,6 +3224,9 @@ class ESP32FileBrowser(QMainWindow):
         self._terminal_stopping = False
         self.terminal_xterm_proc = None
         self._terminal_external = False
+        if self._terminal_active_mode == "mpremote":
+            self._release_device_repl_mode()
+        self._terminal_active_mode = None
         self._set_terminal_running_ui(False)
         if was_stopping:
             return
@@ -3217,6 +3240,9 @@ class ESP32FileBrowser(QMainWindow):
         """Handle embedded xterm process errors."""
         if self._terminal_stopping:
             return
+        if self._terminal_active_mode == "mpremote":
+            self._release_device_repl_mode()
+        self._terminal_active_mode = None
         name = getattr(process_error, "name", str(process_error))
         self._set_terminal_status(f"Terminal error: {name}")
 
