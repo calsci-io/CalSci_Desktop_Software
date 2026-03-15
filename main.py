@@ -85,10 +85,8 @@ class CalSciApp(QMainWindow):
 
         self.operation_in_progress = False
         self.file_browser = None
-        self.hybrid_win = None
         self._device_connected = False
         self.simulator_process = None
-        self._active_device_mode = None
         self._cross_sync_enabled = False
         self._cross_sync_root = ""
         self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
@@ -953,33 +951,6 @@ class CalSciApp(QMainWindow):
     def _on_file_browser_closed(self, _obj=None):
         self.file_browser = None
 
-    def _claim_device_mode(self, mode, requester_label):
-        if self._active_device_mode is None:
-            self._active_device_mode = mode
-            return True
-
-        if self._active_device_mode == mode:
-            return True
-
-        current_label = {
-            "hybrid": "Hybrid Simulator",
-            "repl": "mpremote REPL",
-        }.get(self._active_device_mode, "device session")
-        message = f"Close {current_label} before opening {requester_label}."
-        self._log(message, "warning")
-        if self.statusBar():
-            self.statusBar().showMessage(message)
-        QMessageBox.warning(self, "Device Busy", message)
-        return False
-
-    def _release_device_mode(self, mode):
-        if self._active_device_mode == mode:
-            self._active_device_mode = None
-
-    def _on_hybrid_window_closed(self, _obj=None):
-        self.hybrid_win = None
-        self._release_device_mode("hybrid")
-
     def _lock_buttons(self):
         self.operation_in_progress = True
         self.update_btn.setEnabled(False)
@@ -1575,20 +1546,10 @@ class CalSciApp(QMainWindow):
         if not self._ensure_window_sequence("launching hybrid simulator"):
             return
 
-        if self.hybrid_win and self.hybrid_win.isVisible():
-            self.hybrid_win.raise_()
-            self.hybrid_win.activateWindow()
-            self._log("Hybrid Simulator already running. Close it before launching another.", "warning")
-            return
-
-        if not self._claim_device_mode("hybrid", "Hybrid Simulator"):
-            return
-
         try:
             ports = find_esp32_ports()
             if not ports:
                 self._log("No CalSci device detected", "error")
-                self._release_device_mode("hybrid")
                 return
             port = ports[0]
             self._log(f"CalSci found on {port}", "success")
@@ -1596,12 +1557,9 @@ class CalSciApp(QMainWindow):
             # Import and show hybrid simulator window
             from hybrid_simulator_window import HybridSimulatorWindow
             self.hybrid_win = HybridSimulatorWindow(port)
-            self.hybrid_win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            self.hybrid_win.destroyed.connect(self._on_hybrid_window_closed)
             self.hybrid_win.show()
             self._log("Hybrid Simulator window opened", "success")
         except Exception as e:
-            self._release_device_mode("hybrid")
             self._log(f"Failed to launch hybrid simulator: {e}", "error")
 
     def _handle_delete_selected(self):

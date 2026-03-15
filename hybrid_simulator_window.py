@@ -27,13 +27,13 @@ from PySide6.QtWidgets import (
 )
 
 HYBRID_BAUDRATE = 115200
-HYBRID_DEBOUNCE_MS = 35
+HYBRID_DEBOUNCE_MS = 5
 SERIAL_WRITE_CHUNK = 256
 SERIAL_WRITE_RETRIES = 2
 STARTUP_SYNC_TIMEOUT_SEC = 2.5
 PING_ECHO_TIMEOUT_SEC = 2.0
 SYNC_FULL_RETRY_SEC = 0.35
-STATE_POLL_INTERVAL_MS = 120
+STATE_POLL_INTERVAL_MS = 5
 STATE_POLL_TIMEOUT_SEC = 0.45
 KEY_ACK_TIMEOUT_FLOOR_SEC = 0.08
 MAX_PENDING_KEYS = 1
@@ -715,6 +715,7 @@ class HybridSimulatorWindow(QMainWindow):
         self._last_sync_full_request_ts = 0.0
         self._last_poll_request_ts = 0.0
         self._poll_in_flight = False
+        self._fast_repoll_pending = False
         self._effective_debounce_ms = int(HYBRID_DEBOUNCE_MS)
         self._device_graph_fast_ms = None
         self._key_ack_timeout_sec = KEY_ACK_TIMEOUT_FLOOR_SEC
@@ -1211,6 +1212,12 @@ class HybridSimulatorWindow(QMainWindow):
             self._device_graph_fast_ms = sync.get("graph_fast_ms", None)
             self._configure_input_timing(device_debounce_ms)
 
+            self.status_label.setText("Enabling hybrid mode...")
+            self._send_hybrid_helper('_hyb_mode(True) if "_hyb_mode" in globals() else None')
+            mode_on = self._wait_for_marker("HYBRID_MODE:ON", timeout=1.2)
+            if not mode_on:
+                raise RuntimeError("Hybrid mode did not enable cleanly")
+
             self.status_label.setText("Starting hybrid reader...")
             self.reader_thread = SerialReaderThread(self.ser)
             self.reader_thread.state_received.connect(self._on_state_received)
@@ -1303,13 +1310,10 @@ class HybridSimulatorWindow(QMainWindow):
     def _send_line(self, line):
         self._serial_write_bytes((line + "\n").encode("utf-8"), flush=False)
 
-    def _send_hybrid_helper(self, helper_line, fallback_line=None):
-        if self.transport_mode == "repl":
-            self._send_line(helper_line)
-            return True
-        if fallback_line is None:
+    def _send_hybrid_helper(self, helper_line):
+        if self.transport_mode != "repl":
             return False
-        self._send_line(fallback_line)
+        self._send_line(helper_line)
         return True
 
     def _request_full_frame(self, force=False):
@@ -1319,15 +1323,17 @@ class HybridSimulatorWindow(QMainWindow):
         self._last_sync_full_request_ts = now
         try:
             self._send_hybrid_helper(
-                '_hyb_sync_full() if "_hyb_sync_full" in globals() else None',
-                "SYNC:FULL",
+                '_hyb_sync_full() if "_hyb_sync_full" in globals() else None'
             )
+            self._poll_in_flight = True
+            self._last_poll_request_ts = now
             return True
         except Exception:
+            self._poll_in_flight = False
             return False
 
     def _state_poll_interval_ms(self):
-        return max(80, int(STATE_POLL_INTERVAL_MS))
+        return max(25, int(STATE_POLL_INTERVAL_MS))
 
     def _request_polled_state(self, force=False):
         if self.transport_mode != "repl":
@@ -1355,7 +1361,23 @@ class HybridSimulatorWindow(QMainWindow):
             return False
 
     def _poll_device_state(self):
+        if self._key_in_flight is not None:
+            return
         self._request_polled_state(force=False)
+
+    def _run_fast_repoll(self):
+        self._fast_repoll_pending = False
+        self._poll_device_state()
+
+    def _schedule_fast_repoll(self):
+        if self._fast_repoll_pending:
+            return
+        if not self.connected or not self.ser or not self.ser.is_open:
+            return
+        if self._key_in_flight is not None or self._pending_keys:
+            return
+        self._fast_repoll_pending = True
+        QTimer.singleShot(0, self._run_fast_repoll)
 
     def _wait_for_marker(self, marker, timeout=5.0):
         return self._wait_for_any_markers([marker], timeout=timeout) is not None
@@ -1438,10 +1460,7 @@ class HybridSimulatorWindow(QMainWindow):
         safe = "".join(ch for ch in token if ch.isalnum() or ch in ("_", "-"))
         if not safe:
             safe = "PCHELLO"
-        self._send_line(
-            'print("ECHO:%s") if "_hyb_ping" not in globals() else _hyb_ping("%s")'
-            % (safe, safe)
-        )
+        self._send_line('_hyb_ping("%s")' % safe)
         return self._wait_for_marker(f"ECHO:{safe}", timeout=1.2)
 
     def _clear_key_pipeline(self):
@@ -1470,6 +1489,8 @@ class HybridSimulatorWindow(QMainWindow):
     def _send_next_queued_key(self):
         if self._key_in_flight is not None:
             return
+        if self._poll_in_flight:
+            return
         if not self._pending_keys:
             return
         if not self.connected or not self.ser or not self.ser.is_open:
@@ -1481,16 +1502,9 @@ class HybridSimulatorWindow(QMainWindow):
         key_label = str(display_label(key_value)).strip() or str(key_value)
 
         try:
-            if self.transport_mode == "repl":
-                self._send_hybrid_helper(
-                    f'_hyb_key({col},{row}) if "_hyb_key" in globals() else print("HYBRID_KEY_ERR:HELPER_MISSING")'
-                )
-            else:
-                self._serial_write_bytes(
-                    f"KEY:{col},{row}\n".encode("ascii"),
-                    flush=False,
-                    retries=1,
-                )
+            self._send_hybrid_helper(
+                f'_hyb_key({col},{row}) if "_hyb_key" in globals() else print("HYBRID_KEY_ERR:HELPER_MISSING")'
+            )
             self._key_in_flight = (row, col, from_hold, key_label)
             self._key_ack_timer.start(max(1, int(self._key_ack_timeout_sec * 1000)))
             if from_hold:
@@ -1564,16 +1578,14 @@ class HybridSimulatorWindow(QMainWindow):
         now = time.perf_counter()
         repaint_due = (now - self._last_state_apply_ts) >= self._min_state_apply_sec
         repaint_needed = False
-        key_sync_event = any(
-            key in state for key in ("fb_raw", "fb", "patches_raw", "patches", "fb_full", "lines", "nav")
-        )
-
         frame_id = state.get("frame_id", None)
         if frame_id is not None:
             try:
                 self._last_frame_id = int(frame_id)
             except Exception:
                 pass
+
+        state_changed = bool(state.get("changed", False))
 
         nav = self.display_widget.nav_text
         if "nav" in state:
@@ -1769,8 +1781,13 @@ class HybridSimulatorWindow(QMainWindow):
             self._last_state_apply_ts = now
             self.display_widget.update()
 
-        if key_sync_event:
-            self._ack_inflight_key()
+        # Poll replies are expected even when nothing changed, so only the
+        # explicit HYBRID_KEY_OK line or the key-ack timeout should release an
+        # in-flight key. Normal state traffic should just keep the queue moving.
+        if self._key_in_flight is None and self._pending_keys:
+            self._send_next_queued_key()
+        elif state_changed or full_applied or patch_applied:
+            self._schedule_fast_repoll()
 
         mapped_mode = self._mode_from_nav(nav)
         if mapped_mode and mapped_mode != self.current_mode:
@@ -1797,6 +1814,9 @@ class HybridSimulatorWindow(QMainWindow):
         if line.startswith("HYBRID_KEY_OK:"):
             self.status_label.setText(line.strip())
             self._ack_inflight_key()
+            return
+        if line.startswith("HYBRID_MODE:"):
+            self.status_label.setText(line.strip())
             return
         if line.startswith("HYBRID_READY"):
             self.status_label.setText(f"Connected on {self.port} (bridge ready)")
@@ -1826,7 +1846,7 @@ class HybridSimulatorWindow(QMainWindow):
         if line.startswith("HYBRID_BRIDGE_ERR") or line.startswith("HYBRID_INIT_ERR"):
             self.status_label.setText(line.strip())
             return
-        if line.startswith("HYBRID_SYNC_ERR") or line.startswith("HYBRID_KEY_ERR"):
+        if line.startswith("HYBRID_SYNC_ERR") or line.startswith("HYBRID_STATUS_ERR") or line.startswith("HYBRID_KEY_ERR"):
             self.status_label.setText(line.strip())
             return
         if line.startswith("DEB:"):
@@ -1854,5 +1874,9 @@ class HybridSimulatorWindow(QMainWindow):
             self.reader_thread.stop()
             self.reader_thread.wait(800)
         if self.ser and self.ser.is_open:
+            try:
+                self._send_hybrid_helper('_hyb_mode(False) if "_hyb_mode" in globals() else None')
+            except Exception:
+                pass
             self.ser.close()
         event.accept()
