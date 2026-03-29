@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QCheckBox, QProgressBar, QTextEdit,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QSplitter,
     QFrame, QStatusBar, QMessageBox, QPlainTextEdit, QTabWidget, QMenu,
-    QDialog, QFileDialog
+    QDialog, QFileDialog, QLineEdit, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QSize, QEvent
 from PySide6.QtGui import QTextCursor
@@ -49,6 +49,11 @@ from config import (
     TRIPLE_CPP_SOURCE_CANDIDATES,
     TRIPLE_RUST_BIN_SOURCE_CANDIDATES,
     TRIPLE_RUST_ELF_SOURCE_CANDIDATES,
+    WIRELESS_DEFAULT_PASSWORD,
+    WIRELESS_DEFAULT_PORT,
+    WIRELESS_RESET_DELAY_MS,
+    WIRELESS_SETTINGS_FILE,
+    WIRELESS_STATUS_PORT,
 )
 from utils import find_esp32_ports, ensure_repo, delete_repo, repo_status, pull_repo, get_all_files
 from flasher import (
@@ -63,6 +68,12 @@ from flasher import (
 from signal_bridge import SignalBridge
 from dialogs import ESP32FileSelectionDialog
 from filebrowser import ESP32FileBrowser
+from wireless import (
+    WirelessTransferError,
+    WirelessWebReplTransport,
+    check_webrepl_available,
+)
+from wireless_terminal import WirelessReplDialog
 
 # ============================================================
 # ================= MAIN APPLICATION ==========================
@@ -85,10 +96,16 @@ class CalSciApp(QMainWindow):
 
         self.operation_in_progress = False
         self.file_browser = None
+        self.wireless_repl_dialog = None
         self._device_connected = False
         self.simulator_process = None
         self._cross_sync_enabled = False
         self._cross_sync_root = ""
+        self._wireless_settings = {
+            "mode": "usb",
+            "host": "",
+            "password": WIRELESS_DEFAULT_PASSWORD,
+        }
         self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
         self._selected_triple_flash_keys = set()
         self._triple_checkboxes = {}
@@ -96,6 +113,7 @@ class CalSciApp(QMainWindow):
         self._build_ui()
         self._apply_stylesheet()
         self._initialize_sync_source_controls()
+        self._load_wireless_settings()
         self._initialize_triple_firmware_controls()
         self._update_triple_flash_button_state()
 
@@ -206,6 +224,46 @@ class CalSciApp(QMainWindow):
         sync_row_layout.addWidget(self.cross_sync_cb, 1)
 
         left_layout.addWidget(sync_row)
+
+        wireless_mode_row = QWidget()
+        wireless_mode_layout = QHBoxLayout(wireless_mode_row)
+        wireless_mode_layout.setContentsMargins(0, 0, 0, 0)
+        wireless_mode_layout.setSpacing(8)
+
+        self.transport_combo = QComboBox()
+        self.transport_combo.setObjectName("syncSourceCombo")
+        self.transport_combo.addItem("USB Serial", "usb")
+        self.transport_combo.addItem("WiFi / WebREPL", "wifi")
+        self.transport_combo.currentIndexChanged.connect(self._on_transport_changed)
+        wireless_mode_layout.addWidget(self.transport_combo, 1)
+
+        self.open_wireless_repl_btn = QPushButton("Wireless REPL")
+        self.open_wireless_repl_btn.setObjectName("btnSecondaryCompact")
+        self.open_wireless_repl_btn.clicked.connect(self._open_wireless_repl)
+        wireless_mode_layout.addWidget(self.open_wireless_repl_btn, 1)
+
+        left_layout.addWidget(wireless_mode_row)
+
+        wireless_host_row = QWidget()
+        wireless_host_layout = QHBoxLayout(wireless_host_row)
+        wireless_host_layout.setContentsMargins(0, 0, 0, 0)
+        wireless_host_layout.setSpacing(8)
+
+        self.wireless_host_input = QLineEdit()
+        self.wireless_host_input.setObjectName("inlineField")
+        self.wireless_host_input.setPlaceholderText("CalSci IP / host")
+        self.wireless_host_input.editingFinished.connect(self._save_wireless_settings)
+        self.wireless_host_input.editingFinished.connect(self._check_device_status)
+        wireless_host_layout.addWidget(self.wireless_host_input, 1)
+
+        self.wireless_password_input = QLineEdit()
+        self.wireless_password_input.setObjectName("inlineField")
+        self.wireless_password_input.setPlaceholderText("WebREPL password")
+        self.wireless_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.wireless_password_input.editingFinished.connect(self._save_wireless_settings)
+        wireless_host_layout.addWidget(self.wireless_password_input, 1)
+
+        left_layout.addWidget(wireless_host_row)
 
         self.upload_custom_btn = QPushButton("Upload Custom Folder")
         self.upload_custom_btn.setObjectName("btnSecondary")
@@ -437,6 +495,20 @@ class CalSciApp(QMainWindow):
                 selection-color: #ffffff;
             }
 
+            QLineEdit#inlineField {
+                background-color: #2a2a2a;
+                color: #dddddd;
+                border: 1px solid #444;
+                border-radius: 6px;
+                padding: 8px 10px;
+            }
+            QLineEdit#inlineField:hover {
+                border-color: #666;
+            }
+            QLineEdit#inlineField:focus {
+                border-color: #e95420;
+            }
+
             QCheckBox#preventSleepCheckbox {
                 color: #a0a0a0;
                 font-size: 12px;
@@ -553,6 +625,123 @@ class CalSciApp(QMainWindow):
             self._log(f"Selected sync path is not a folder: {root}", "error")
             return None
         return root
+
+    def _is_wireless_mode(self):
+        return self.transport_combo.currentData() == "wifi"
+
+    def _load_wireless_settings(self):
+        settings = dict(self._wireless_settings)
+        if WIRELESS_SETTINGS_FILE.exists():
+            try:
+                loaded = json.loads(WIRELESS_SETTINGS_FILE.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    settings["mode"] = str(loaded.get("mode", settings["mode"]) or settings["mode"])
+                    settings["host"] = str(loaded.get("host", settings["host"]) or "")
+                    settings["password"] = str(
+                        loaded.get("password", settings["password"]) or settings["password"]
+                    )
+            except Exception:
+                pass
+
+        self._wireless_settings = settings
+        index = self.transport_combo.findData(settings["mode"])
+        if index < 0:
+            index = 0
+        self.transport_combo.blockSignals(True)
+        self.transport_combo.setCurrentIndex(index)
+        self.transport_combo.blockSignals(False)
+        self.wireless_host_input.setText(settings["host"])
+        self.wireless_password_input.setText(settings["password"])
+        self._update_transport_controls()
+
+    def _save_wireless_settings(self):
+        self._wireless_settings = {
+            "mode": self.transport_combo.currentData() or "usb",
+            "host": self.wireless_host_input.text().strip(),
+            "password": self.wireless_password_input.text().strip() or WIRELESS_DEFAULT_PASSWORD,
+        }
+        try:
+            WIRELESS_SETTINGS_FILE.write_text(
+                json.dumps(self._wireless_settings, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            self._log(f"Failed to save wireless settings: {e}", "warning")
+
+    def _update_transport_controls(self):
+        is_wireless = self._is_wireless_mode()
+        wireless_enabled = not self.operation_in_progress
+        self.transport_combo.setEnabled(not self.operation_in_progress)
+        self.wireless_host_input.setEnabled(wireless_enabled)
+        self.wireless_password_input.setEnabled(wireless_enabled)
+        self.open_wireless_repl_btn.setEnabled(wireless_enabled)
+        if is_wireless:
+            self.update_with_fw_cb.setChecked(False)
+        self.update_with_fw_cb.setEnabled((not is_wireless) and (not self.operation_in_progress))
+
+    def _on_transport_changed(self, _index):
+        self._save_wireless_settings()
+        self._update_transport_controls()
+        self._check_device_status()
+
+    def _resolve_transfer_target(self):
+        if self._is_wireless_mode():
+            host = self.wireless_host_input.text().strip()
+            password = self.wireless_password_input.text().strip() or WIRELESS_DEFAULT_PASSWORD
+            if not host:
+                raise RuntimeError("Enter the CalSci WiFi IP/host first")
+            return {
+                "mode": "wifi",
+                "host": host,
+                "password": password,
+                "port": WIRELESS_DEFAULT_PORT,
+                "status_port": WIRELESS_STATUS_PORT,
+            }
+
+        ports = find_esp32_ports()
+        if not ports:
+            raise RuntimeError("No CalSci device detected")
+        return {"mode": "usb", "port": ports[0]}
+
+    def _create_transfer_client(self, target):
+        if target["mode"] == "wifi":
+            return WirelessWebReplTransport(
+                host=target["host"],
+                password=target["password"],
+                port=target["port"],
+                status_port=target["status_port"],
+                reset_delay_ms=WIRELESS_RESET_DELAY_MS,
+            )
+        return MicroPyFlasher(target["port"])
+
+    def _target_label(self, target):
+        if target["mode"] == "wifi":
+            return "{}:{}".format(target["host"], target["port"])
+        return target["port"]
+
+    def _open_wireless_repl(self):
+        host = self.wireless_host_input.text().strip()
+        if not host:
+            QMessageBox.information(
+                self,
+                "Wireless REPL",
+                "Enter the CalSci IP address first.",
+            )
+            return
+        password = self.wireless_password_input.text().strip() or WIRELESS_DEFAULT_PASSWORD
+        if self.wireless_repl_dialog is None or not self.wireless_repl_dialog.isVisible():
+            self.wireless_repl_dialog = WirelessReplDialog(
+                host=host,
+                password=password,
+                port=WIRELESS_DEFAULT_PORT,
+                parent=self,
+            )
+            self.wireless_repl_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self.wireless_repl_dialog.destroyed.connect(lambda *_: setattr(self, "wireless_repl_dialog", None))
+            self.wireless_repl_dialog.show()
+        else:
+            self.wireless_repl_dialog.raise_()
+            self.wireless_repl_dialog.activateWindow()
 
     def _normalize_folder_path(self, path_str):
         return str(Path(path_str).expanduser().resolve())
@@ -857,15 +1046,28 @@ class CalSciApp(QMainWindow):
 
     def _check_device_status(self):
         if not self.operation_in_progress:
-            ports = find_esp32_ports()
-            was_connected = self._device_connected
-            is_connected = len(ports) > 0
+            if self._is_wireless_mode():
+                host = self.wireless_host_input.text().strip()
+                is_connected = check_webrepl_available(host, WIRELESS_DEFAULT_PORT) if host else False
+            else:
+                ports = find_esp32_ports()
+                is_connected = len(ports) > 0
             self._device_connected = is_connected
 
             self.bridge.device_status_signal.emit(is_connected)
 
     def _update_device_status(self, connected):
-        if connected:
+        if self._is_wireless_mode():
+            if connected:
+                self.esp_status_label.setText("● WiFi ready")
+                self.esp_status_label.setObjectName("espStatusConnected")
+            elif self.wireless_host_input.text().strip():
+                self.esp_status_label.setText("● WiFi unavailable")
+                self.esp_status_label.setObjectName("espStatusDisconnected")
+            else:
+                self.esp_status_label.setText("● WiFi host not set")
+                self.esp_status_label.setObjectName("espStatusDisconnected")
+        elif connected:
             self.esp_status_label.setText("● Device connected")
             self.esp_status_label.setObjectName("espStatusConnected")
         else:
@@ -935,6 +1137,7 @@ class CalSciApp(QMainWindow):
         self.clear_btn.setEnabled(True)
         self.simulator_btn.setEnabled(True)
         self.hybrid_simulator_btn.setEnabled(True)
+        self._update_transport_controls()
         self._check_device_status()
 
     def _ensure_window_sequence(self, action_label):
@@ -964,12 +1167,21 @@ class CalSciApp(QMainWindow):
         self.clear_btn.setEnabled(False)
         self.simulator_btn.setEnabled(False)
         self.hybrid_simulator_btn.setEnabled(False)
+        self._update_transport_controls()
         self.progress_bar.setValue(0)
 
     def _log(self, message, msg_type="info"):
         self.bridge.log_signal.emit(message, msg_type)
 
     def _open_file_browser(self):
+        if self._is_wireless_mode():
+            QMessageBox.information(
+                self,
+                "Code Editor",
+                "The Code Editor still uses USB serial. Use the Wireless REPL button for Wi-Fi REPL access.",
+            )
+            return
+
         ports = find_esp32_ports()
         if not ports:
             QMessageBox.warning(
@@ -1007,43 +1219,31 @@ class CalSciApp(QMainWindow):
 
                 self._log("Repository updated successfully ✓", "success")
 
-                # Determine progress for next phase
+                # Determine transfer target and optional firmware phase
+                target = self._resolve_transfer_target()
+                if target["mode"] == "wifi" and self.update_with_fw_cb.isChecked():
+                    raise RuntimeError("Firmware flashing requires USB serial. Disable 'with firmware' for Wi-Fi uploads.")
+
                 if self.update_with_fw_cb.isChecked():
                     self.bridge.progress_signal.emit(0.40)
-
-                    # Phase 2: Firmware flash (30%)
-                    ports = find_esp32_ports()
-                    if not ports:
-                        raise RuntimeError("No CalSci device detected")
-                    port = ports[0]
+                    port = target["port"]
                     self._log(f"CalSci found: {port}", "success")
                     self.bridge.progress_signal.emit(0.45)
                     self._log("Flashing firmware…", "info")
                     port = flash_firmware(port, FIRMWARE_BIN, log_func=self._log, enter_bootloader=False)
                     self._log("Firmware flashed ✓", "success")
                     self.bridge.progress_signal.emit(0.70)
-
-                    # Device is rebooting, wait for it to be ready
                     self._log("Waiting for CalSci to boot…", "info")
                     time.sleep(3)
-
-                    # Re-scan port after firmware flash
-                    ports = find_esp32_ports()
-                    if not ports:
-                        raise RuntimeError("CalSci not detected after firmware flash")
-                    port = ports[0]
+                    target = self._resolve_transfer_target()
                 else:
                     self.bridge.progress_signal.emit(0.60)
-                    ports = find_esp32_ports()
-                    if not ports:
-                        raise RuntimeError("No CalSci device detected")
-                    port = ports[0]
-                    self._log(f"CalSci found: {port}", "success")
+                    self._log(f"CalSci found: {self._target_label(target)}", "success")
                     self.bridge.progress_signal.emit(0.70)
 
                 # Phase 3: Clear all files
                 self._log("Clearing all files from CalSci…", "warning")
-                flasher = MicroPyFlasher(port)
+                flasher = self._create_transfer_client(target)
                 flasher.clean_all(self._log)
                 self.bridge.progress_signal.emit(0.75)
 
@@ -1057,22 +1257,44 @@ class CalSciApp(QMainWindow):
                     total_size = max(sum(p.stat().st_size for p in local_files), 1)
                     uploaded_size = 0
                     auto_retry = self.auto_retry_cb.isChecked()
+                    reporter = getattr(flasher, "progress_reporter", None)
+                    if reporter is not None:
+                        reporter.begin("full_upload", len(local_files), total_size)
 
                     for i, local_path in enumerate(sorted(local_files), 1):
                         remote_rel = "/" + local_path.relative_to(sync_root).as_posix()
+                        file_size = max(local_path.stat().st_size, 1)
+                        if reporter is not None:
+                            reporter.file_started(i, remote_rel, file_size)
+
+                        progress_cb = None
+                        if reporter is not None:
+                            def progress_cb(sent, total, base_uploaded=uploaded_size):
+                                overall = base_uploaded + max(0, int(sent))
+                                self.bridge.progress_signal.emit(0.75 + (overall / total_size) * 0.25)
+                                reporter.file_progress(sent, overall)
+
                         flasher, success = self._upload_single_file(
-                            flasher, port, local_path, remote_rel, auto_retry,
-                            ensure_dirs=False, use_raw=True
+                            flasher, target, local_path, remote_rel, auto_retry,
+                            ensure_dirs=False, use_raw=True, progress_cb=progress_cb
                         )
                         if success:
-                            uploaded_size += max(local_path.stat().st_size, 1)
+                            uploaded_size += file_size
                             progress = 0.75 + (uploaded_size / total_size) * 0.25
                             self.bridge.progress_signal.emit(progress)
+                            if reporter is not None:
+                                reporter.file_finished(True)
                             self._log(f"  [{i}/{len(local_files)}] ⬆  {remote_rel}  ({local_path.stat().st_size} bytes)", "info")
                         else:
+                            if reporter is not None:
+                                reporter.file_finished(False)
                             self._log(f"  [{i}/{len(local_files)}] Failed: {remote_rel}", "warning")
 
                     self._log("All files uploaded ✓", "success")
+                    if reporter is not None:
+                        reporter.complete(auto_reset=True, reset_delay_ms=WIRELESS_RESET_DELAY_MS)
+                        self._log("Auto-resetting CalSci over Wi-Fi…", "info")
+                        flasher.reset_device()
                 else:
                     self._log("No files to upload", "info")
 
@@ -1082,6 +1304,9 @@ class CalSciApp(QMainWindow):
 
             except Exception as e:
                 self._log(f"Error: {e}", "error")
+                reporter = getattr(flasher, "progress_reporter", None) if flasher else None
+                if reporter is not None:
+                    reporter.fail(str(e))
                 self.bridge.progress_signal.emit(0.0)
                 if flasher:
                     try:
@@ -1107,16 +1332,12 @@ class CalSciApp(QMainWindow):
 
         def run():
             try:
-                ports = find_esp32_ports()
-                if not ports:
-                    raise RuntimeError("No ESP32 device detected")
-
-                port = ports[0]
-                self._log(f"CalSci found: {port}", "success")
+                target = self._resolve_transfer_target()
+                self._log(f"CalSci found: {self._target_label(target)}", "success")
                 self._log(f"Sync source: {sync_root}", "info")
                 self.bridge.progress_signal.emit(0.05)
 
-                flasher = MicroPyFlasher(port)
+                flasher = self._create_transfer_client(target)
                 # self._log("soft resetting device…", "info")
                 # flasher.reset_soft_automated(auto_cd="/apps/installed_apps", log_func=self._log)
 
@@ -1199,24 +1420,42 @@ class CalSciApp(QMainWindow):
                     uploaded_size = 0
                     failed = []
                     auto_retry = self.auto_retry_cb.isChecked()
+                    reporter = getattr(flasher, "progress_reporter", None)
+                    if reporter is not None:
+                        reporter.begin("delta_sync", len(to_upload), total_size)
 
                     self._log(f"Uploading {len(to_upload)} file(s)…", "info")
 
                     for i, (remote, local_path) in enumerate(sorted(to_upload, key=lambda x: x[0]), 1):
                         remote_rel = remote.lstrip("/")
+                        file_size = max(local_path.stat().st_size, 1)
+                        if reporter is not None:
+                            reporter.file_started(i, remote, file_size)
+
+                        progress_cb = None
+                        if reporter is not None:
+                            def progress_cb(sent, total, base_uploaded=uploaded_size):
+                                overall = base_uploaded + max(0, int(sent))
+                                progress = 0.35 + (overall / total_size) * 0.65
+                                self.bridge.progress_signal.emit(progress)
+                                reporter.file_progress(sent, overall)
 
                         flasher, success = self._upload_single_file(
-                            flasher, port, local_path, remote_rel, auto_retry,
-                            ensure_dirs=False, use_raw=True
+                            flasher, target, local_path, remote_rel, auto_retry,
+                            ensure_dirs=False, use_raw=True, progress_cb=progress_cb
                         )
 
                         if success:
-                            uploaded_size += max(local_path.stat().st_size, 1)
+                            uploaded_size += file_size
                             progress = 0.35 + (uploaded_size / total_size) * 0.65
                             self.bridge.progress_signal.emit(progress)
+                            if reporter is not None:
+                                reporter.file_finished(True)
                             self._log(f"  [{i}/{len(to_upload)}] ⬆  {remote}  ({local_path.stat().st_size} bytes)", "info")
                         else:
                             failed.append(remote)
+                            if reporter is not None:
+                                reporter.file_finished(False)
                             self._log(f"  [{i}/{len(to_upload)}] Failed: {remote}", "warning")
 
                     if failed:
@@ -1224,15 +1463,25 @@ class CalSciApp(QMainWindow):
                     else:
                         self._log("Sync complete ✓", "success")
                         self.bridge.progress_signal.emit(1.0)
+                    if reporter is not None and not failed:
+                        reporter.complete(auto_reset=True, reset_delay_ms=WIRELESS_RESET_DELAY_MS)
+                        self._log("Auto-resetting CalSci over Wi-Fi…", "info")
+                        flasher.reset_device()
                 else:
                     self._log("Sync complete ✓", "success")
                     self.bridge.progress_signal.emit(1.0)
+                    if target["mode"] == "wifi" and to_delete:
+                        self._log("Auto-resetting CalSci over Wi-Fi…", "info")
+                        flasher.reset_device()
 
                 flasher.exit_raw_repl()
                 flasher.close()
 
             except Exception as e:
                 self._log(f"Error: {str(e)[:80]}", "error")
+                reporter = getattr(flasher, "progress_reporter", None) if 'flasher' in locals() else None
+                if reporter is not None:
+                    reporter.fail(str(e))
                 self.bridge.progress_signal.emit(0.0)
             finally:
                 self.bridge.operation_done_signal.emit()
@@ -1240,6 +1489,9 @@ class CalSciApp(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
     def _handle_flash_tripleboot(self):
         if not self._ensure_window_sequence("flashing triple-boot firmware"):
+            return
+        if self._is_wireless_mode():
+            self._log("Triple-boot flashing requires USB serial. Switch transport back to USB.", "warning")
             return
         selected_keys = [k for k in ("mpy", "cpp", "rust") if k in self._selected_triple_flash_keys]
         selected_name = {"mpy": "MicroPython", "cpp": "C++", "rust": "Rust"}
@@ -1392,12 +1644,8 @@ class CalSciApp(QMainWindow):
 
         def run():
             try:
-                ports = find_esp32_ports()
-                if not ports:
-                    raise RuntimeError("No CalSci device detected")
-
-                port = ports[0]
-                self._log(f"CalSci found: {port}", "success")
+                target = self._resolve_transfer_target()
+                self._log(f"CalSci found: {self._target_label(target)}", "success")
                 if has_root_entry:
                     self._log("Detected boot/main package; uploading directly to '/'", "info")
                 self._log(
@@ -1406,7 +1654,7 @@ class CalSciApp(QMainWindow):
                 )
                 self.bridge.progress_signal.emit(0.05)
 
-                flasher = MicroPyFlasher(port)
+                flasher = self._create_transfer_client(target)
                 auto_retry = self.auto_retry_cb.isChecked()
 
                 required_dirs = {remote_root} if remote_root else set()
@@ -1432,35 +1680,59 @@ class CalSciApp(QMainWindow):
                 total_size = max(sum(p.stat().st_size for p in files), 1)
                 uploaded = 0
                 failed_files = []
+                reporter = getattr(flasher, "progress_reporter", None)
+                if reporter is not None:
+                    reporter.begin("custom_upload", len(files), total_size)
                 self._log(f"Uploading {len(files)} files…", "info")
 
                 for i, local_path in enumerate(files, 1):
                     rel = local_path.relative_to(local_root).as_posix()
                     remote_path = f"{remote_root}/{rel}" if remote_root else rel
+                    file_size = max(local_path.stat().st_size, 1)
+                    if reporter is not None:
+                        reporter.file_started(i, remote_path, file_size)
+
+                    progress_cb = None
+                    if reporter is not None:
+                        def progress_cb(sent, total, base_uploaded=uploaded):
+                            overall = base_uploaded + max(0, int(sent))
+                            self.bridge.progress_signal.emit(0.1 + (overall / total_size) * 0.9)
+                            reporter.file_progress(sent, overall)
                     flasher, success = self._upload_single_file(
-                        flasher, port, local_path, remote_path, auto_retry,
-                        ensure_dirs=False, use_raw=True
+                        flasher, target, local_path, remote_path, auto_retry,
+                        ensure_dirs=False, use_raw=True, progress_cb=progress_cb
                     )
 
                     if success:
-                        uploaded += max(local_path.stat().st_size, 1)
+                        uploaded += file_size
                         self.bridge.progress_signal.emit(0.1 + (uploaded / total_size) * 0.9)
+                        if reporter is not None:
+                            reporter.file_finished(True)
                         self._log(f"[{i}/{len(files)}] {local_path.name}", "info")
                     else:
                         failed_files.append(local_path.name)
+                        if reporter is not None:
+                            reporter.file_finished(False)
                         self._log(f"⚠ Skipped: {local_path.name}", "warning")
-
-                flasher.exit_raw_repl()
-                flasher.close()
 
                 if failed_files:
                     self._log(f"Custom upload done with {len(failed_files)} failure(s)", "warning")
                 else:
                     self._log("Custom folder upload complete ✓", "success")
                     self.bridge.progress_signal.emit(1.0)
+                    if reporter is not None:
+                        reporter.complete(auto_reset=True, reset_delay_ms=WIRELESS_RESET_DELAY_MS)
+                        self._log("Auto-resetting CalSci over Wi-Fi…", "info")
+                        flasher.reset_device()
+
+                flasher.exit_raw_repl()
+                flasher.close()
 
             except Exception as e:
                 self._log(f"Error: {str(e)[:80]}", "error")
+                reporter = getattr(flasher, "progress_reporter", None) if 'flasher' in locals() else None
+                if reporter is not None:
+                    reporter.fail(str(e))
                 self.bridge.progress_signal.emit(0.0)
             finally:
                 self.bridge.operation_done_signal.emit()
@@ -1486,14 +1758,10 @@ class CalSciApp(QMainWindow):
 
         def run():
             try:
-                ports = find_esp32_ports()
-                if not ports:
-                    raise RuntimeError("No CalSci device detected")
+                target = self._resolve_transfer_target()
+                self._log(f"CalSci found: {self._target_label(target)}", "success")
 
-                port = ports[0]
-                self._log(f"CalSci found: {port}", "success")
-
-                flasher = MicroPyFlasher(port)
+                flasher = self._create_transfer_client(target)
                 self._log("Clearing all files from CalSci...", "warning")
                 flasher.clean_all(self._log)
                 flasher.close()
@@ -1680,7 +1948,17 @@ class CalSciApp(QMainWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _upload_single_file(self, flasher, port, path, remote_path, auto_retry, ensure_dirs=True, use_raw=False):
+    def _upload_single_file(
+        self,
+        flasher,
+        target,
+        path,
+        remote_path,
+        auto_retry,
+        ensure_dirs=True,
+        use_raw=False,
+        progress_cb=None,
+    ):
         for attempt in range(2):
             try:
                 if ensure_dirs:
@@ -1688,27 +1966,40 @@ class CalSciApp(QMainWindow):
                 if use_raw:
                     if not flasher.is_raw_repl():
                         flasher.enter_raw_repl()
-                    flasher.put_raw(path, remote_path)
+                    try:
+                        flasher.put_raw(path, remote_path, progress_cb=progress_cb)
+                    except TypeError:
+                        flasher.put_raw(path, remote_path)
                 else:
-                    flasher.put(path, remote_path)
+                    try:
+                        flasher.put(path, remote_path, progress_cb=progress_cb)
+                    except TypeError:
+                        flasher.put(path, remote_path)
                 return flasher, True
             except Exception as e:
                 if attempt == 0 and auto_retry:
                     self._log(f"Retry → {path.name} ( )", "warning")
-                    try:
-                        flasher.ser.dtr = False
-                        flasher.ser.rts = True
-                        # time.sleep(0.1)
-                        flasher.ser.dtr = True
-                        flasher.ser.rts = False
-                        # time.sleep(0.1)
-                        flasher.ser.close()
-                    except Exception:
-                        pass
-                    time.sleep(3)
-                    flasher = MicroPyFlasher(port)
-                    if use_raw:
-                        flasher.enter_raw_repl()
+                    if hasattr(flasher, "reconnect"):
+                        try:
+                            flasher.close()
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                        flasher = flasher.reconnect()
+                    else:
+                        port = target["port"]
+                        try:
+                            flasher.ser.dtr = False
+                            flasher.ser.rts = True
+                            flasher.ser.dtr = True
+                            flasher.ser.rts = False
+                            flasher.ser.close()
+                        except Exception:
+                            pass
+                        time.sleep(3)
+                        flasher = MicroPyFlasher(port)
+                        if use_raw:
+                            flasher.enter_raw_repl()
                 else:
                     self._log(f"Failed: {path.name} — {str(e)[:50]}", "error")
                     return flasher, False

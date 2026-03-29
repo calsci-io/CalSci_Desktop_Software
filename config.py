@@ -12,9 +12,11 @@ ROOT = Path("./calsci_latest_itr")
 SELECTIONS_FILE = Path("./upload_selections.json")
 SYNC_SOURCES_FILE = Path("./sync_sources.json")
 TRIPLE_FIRMWARE_PATHS_FILE = Path("./triple_firmware_paths.json")
+WIRELESS_SETTINGS_FILE = Path("./wireless_settings.json")
 APP_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = APP_DIR.parent
 FIRMWARE_BIN = APP_DIR / "firmware.bin"
+WEBREPL_CLIENT_HTML = WORKSPACE_ROOT / "webrepl" / "webrepl.html"
 
 # ================= TRIPLE BOOT FLASH CONFIG =================
 TRIPLE_BOOTLOADER_OFFSET = "0x0"
@@ -90,3 +92,9 @@ REPL_DELAY = 0.001
 
 # ================= FILE TRANSFER CONFIG =================
 CHUNK_SIZE = 512
+
+# ================= WIRELESS WEBREPL CONFIG =================
+WIRELESS_DEFAULT_PORT = 8266
+WIRELESS_STATUS_PORT = 8267
+WIRELESS_DEFAULT_PASSWORD = "calsci"
+WIRELESS_RESET_DELAY_MS = 1200
