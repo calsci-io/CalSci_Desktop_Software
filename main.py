@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QDialog, QFileDialog, QLineEdit, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QSize, QEvent
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QTextCursor, QIntValidator
 
 # Import from modular files
 from config import (
@@ -54,6 +54,8 @@ from config import (
     WIRELESS_RESET_DELAY_MS,
     WIRELESS_SETTINGS_FILE,
     WIRELESS_STATUS_PORT,
+    PC_SYNC_DEFAULT_PORT,
+    PC_SYNC_SETTINGS_FILE,
 )
 from utils import find_esp32_ports, ensure_repo, delete_repo, repo_status, pull_repo, get_all_files
 from flasher import (
@@ -69,11 +71,13 @@ from signal_bridge import SignalBridge
 from dialogs import ESP32FileSelectionDialog
 from filebrowser import ESP32FileBrowser
 from wireless import (
+    assert_webrepl_available,
     WirelessTransferError,
     WirelessWebReplTransport,
     check_webrepl_available,
 )
 from wireless_terminal import WirelessReplDialog
+from pc_download_server import FolderExportServer, default_export_name, sanitize_export_name
 
 # ============================================================
 # ================= MAIN APPLICATION ==========================
@@ -106,6 +110,12 @@ class CalSciApp(QMainWindow):
             "host": "",
             "password": WIRELESS_DEFAULT_PASSWORD,
         }
+        self._pc_server_settings = {
+            "folder_path": "",
+            "export_name": "",
+            "port": PC_SYNC_DEFAULT_PORT,
+        }
+        self._pc_download_server = FolderExportServer(log_func=self._log)
         self._triple_fw_paths = {"mpy": "", "cpp": "", "rust": ""}
         self._selected_triple_flash_keys = set()
         self._triple_checkboxes = {}
@@ -114,6 +124,7 @@ class CalSciApp(QMainWindow):
         self._apply_stylesheet()
         self._initialize_sync_source_controls()
         self._load_wireless_settings()
+        self._load_pc_server_settings()
         self._initialize_triple_firmware_controls()
         self._update_triple_flash_button_state()
 
@@ -264,6 +275,54 @@ class CalSciApp(QMainWindow):
         wireless_host_layout.addWidget(self.wireless_password_input, 1)
 
         left_layout.addWidget(wireless_host_row)
+
+        pc_server_folder_row = QWidget()
+        pc_server_folder_layout = QHBoxLayout(pc_server_folder_row)
+        pc_server_folder_layout.setContentsMargins(0, 0, 0, 0)
+        pc_server_folder_layout.setSpacing(8)
+
+        self.pc_server_folder_input = QLineEdit()
+        self.pc_server_folder_input.setObjectName("inlineField")
+        self.pc_server_folder_input.setPlaceholderText("PC folder to export")
+        self.pc_server_folder_input.editingFinished.connect(self._save_pc_server_settings)
+        pc_server_folder_layout.addWidget(self.pc_server_folder_input, 1)
+
+        self.pc_server_folder_btn = QPushButton("Browse")
+        self.pc_server_folder_btn.setObjectName("btnSecondaryCompact")
+        self.pc_server_folder_btn.clicked.connect(self._browse_pc_server_folder)
+        pc_server_folder_layout.addWidget(self.pc_server_folder_btn)
+
+        left_layout.addWidget(pc_server_folder_row)
+
+        pc_server_settings_row = QWidget()
+        pc_server_settings_layout = QHBoxLayout(pc_server_settings_row)
+        pc_server_settings_layout.setContentsMargins(0, 0, 0, 0)
+        pc_server_settings_layout.setSpacing(8)
+
+        self.pc_server_name_input = QLineEdit()
+        self.pc_server_name_input.setObjectName("inlineField")
+        self.pc_server_name_input.setPlaceholderText("Folder name in CalSci")
+        self.pc_server_name_input.editingFinished.connect(self._save_pc_server_settings)
+        pc_server_settings_layout.addWidget(self.pc_server_name_input, 1)
+
+        self.pc_server_port_input = QLineEdit()
+        self.pc_server_port_input.setObjectName("inlineField")
+        self.pc_server_port_input.setPlaceholderText("Port")
+        self.pc_server_port_input.setValidator(QIntValidator(1, 65535, self))
+        self.pc_server_port_input.editingFinished.connect(self._save_pc_server_settings)
+        pc_server_settings_layout.addWidget(self.pc_server_port_input)
+
+        left_layout.addWidget(pc_server_settings_row)
+
+        self.pc_server_toggle_btn = QPushButton("Start PC Folder Server")
+        self.pc_server_toggle_btn.setObjectName("btnSecondary")
+        self.pc_server_toggle_btn.clicked.connect(self._toggle_pc_server)
+        left_layout.addWidget(self.pc_server_toggle_btn)
+
+        self.pc_server_status_label = QLabel("PC folder server stopped")
+        self.pc_server_status_label.setObjectName("pcServerStatusLabel")
+        self.pc_server_status_label.setWordWrap(True)
+        left_layout.addWidget(self.pc_server_status_label)
 
         self.upload_custom_btn = QPushButton("Upload Custom Folder")
         self.upload_custom_btn.setObjectName("btnSecondary")
@@ -551,6 +610,13 @@ class CalSciApp(QMainWindow):
                 font-style: italic;
             }
 
+            QLabel#pcServerStatusLabel {
+                color: #9aa0a6;
+                font-size: 11px;
+                line-height: 1.3;
+                padding: 2px 2px 6px 2px;
+            }
+
             QTextEdit#logPanel {
                 background-color: #161616;
                 border: 1px solid #2e2e2e;
@@ -668,6 +734,143 @@ class CalSciApp(QMainWindow):
         except Exception as e:
             self._log(f"Failed to save wireless settings: {e}", "warning")
 
+    def _current_pc_server_port(self):
+        raw_port = self.pc_server_port_input.text().strip()
+        if not raw_port:
+            return int(self._pc_server_settings.get("port", PC_SYNC_DEFAULT_PORT) or PC_SYNC_DEFAULT_PORT)
+        try:
+            return int(raw_port)
+        except Exception:
+            return int(PC_SYNC_DEFAULT_PORT)
+
+    def _load_pc_server_settings(self):
+        settings = dict(self._pc_server_settings)
+        if PC_SYNC_SETTINGS_FILE.exists():
+            try:
+                loaded = json.loads(PC_SYNC_SETTINGS_FILE.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    settings["folder_path"] = str(loaded.get("folder_path", settings["folder_path"]) or "")
+                    settings["export_name"] = str(loaded.get("export_name", settings["export_name"]) or "")
+                    settings["port"] = int(loaded.get("port", settings["port"]) or settings["port"])
+            except Exception:
+                pass
+
+        self._pc_server_settings = settings
+        self.pc_server_folder_input.setText(settings["folder_path"])
+        self.pc_server_name_input.setText(settings["export_name"])
+        self.pc_server_port_input.setText(str(settings["port"]))
+        self._update_pc_server_controls()
+        self._refresh_pc_server_status()
+
+    def _save_pc_server_settings(self):
+        folder_path = self.pc_server_folder_input.text().strip()
+        export_name = sanitize_export_name(self.pc_server_name_input.text().strip())
+        if folder_path and not export_name:
+            export_name = default_export_name(folder_path)
+        port = self._current_pc_server_port()
+
+        self._pc_server_settings = {
+            "folder_path": folder_path,
+            "export_name": export_name,
+            "port": port,
+        }
+        if self.pc_server_name_input.text().strip() != export_name:
+            self.pc_server_name_input.setText(export_name)
+        if self.pc_server_port_input.text().strip() != str(port):
+            self.pc_server_port_input.setText(str(port))
+
+        try:
+            PC_SYNC_SETTINGS_FILE.write_text(
+                json.dumps(self._pc_server_settings, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            self._log(f"Failed to save PC folder server settings: {e}", "warning")
+
+        self._refresh_pc_server_status()
+
+    def _browse_pc_server_folder(self):
+        start_dir = self.pc_server_folder_input.text().strip() or str(Path.home())
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select PC Folder to Export",
+            start_dir,
+        )
+        if not selected:
+            return
+
+        self.pc_server_folder_input.setText(selected)
+        if not self.pc_server_name_input.text().strip():
+            self.pc_server_name_input.setText(default_export_name(selected))
+        self._save_pc_server_settings()
+        self._log(f"PC export folder selected: {selected}", "success")
+
+    def _update_pc_server_controls(self):
+        is_running = self._pc_download_server.is_running()
+        self.pc_server_folder_input.setEnabled(not is_running)
+        self.pc_server_folder_btn.setEnabled(not is_running)
+        self.pc_server_name_input.setEnabled(not is_running)
+        self.pc_server_port_input.setEnabled(not is_running)
+        self.pc_server_toggle_btn.setText("Stop PC Folder Server" if is_running else "Start PC Folder Server")
+
+    def _refresh_pc_server_status(self):
+        status = self._pc_download_server.status()
+        folder_name = self.pc_server_name_input.text().strip() or status["export_name"] or "calsci_bundle"
+        port = status["port"] or self._current_pc_server_port()
+        addresses = status["addresses"]
+        primary = status["primary_address"] or "127.0.0.1"
+        if status["running"]:
+            text = "Serving '{}' at {}:{}\nFolder: {}".format(
+                folder_name,
+                primary,
+                port,
+                status["root_path"] or self.pc_server_folder_input.text().strip() or "-",
+            )
+        else:
+            text = "Server stopped. Start it, then use {}:{} in CalSci.\nFolder name: {}".format(
+                primary,
+                port,
+                folder_name,
+            )
+        self.pc_server_status_label.setText(text)
+        self.pc_server_status_label.setToolTip("Available IPs: " + ", ".join(addresses))
+        self._update_pc_server_controls()
+
+    def _toggle_pc_server(self):
+        if self._pc_download_server.is_running():
+            self._pc_download_server.stop()
+            self._refresh_pc_server_status()
+            return
+
+        self._save_pc_server_settings()
+        folder_path = self._pc_server_settings["folder_path"]
+        export_name = self._pc_server_settings["export_name"] or default_export_name(folder_path)
+        port = self._pc_server_settings["port"]
+        if not folder_path:
+            QMessageBox.warning(self, "PC Folder Server", "Select a PC folder first.")
+            return
+
+        try:
+            status = self._pc_download_server.start(folder_path, export_name, port)
+            self.pc_server_name_input.setText(status["export_name"])
+            self.pc_server_port_input.setText(str(status["port"]))
+            self._pc_server_settings["export_name"] = status["export_name"]
+            self._pc_server_settings["port"] = status["port"]
+            self._save_pc_server_settings()
+            self._log(
+                "PC folder server ready at {}:{} for '{}'".format(
+                    status["addresses"][0],
+                    status["port"],
+                    status["export_name"],
+                ),
+                "success",
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "PC Folder Server", str(e))
+            self._log(f"Failed to start PC folder server: {e}", "error")
+        finally:
+            self._refresh_pc_server_status()
+
     def _update_transport_controls(self):
         is_wireless = self._is_wireless_mode()
         wireless_enabled = not self.operation_in_progress
@@ -705,6 +908,7 @@ class CalSciApp(QMainWindow):
 
     def _create_transfer_client(self, target):
         if target["mode"] == "wifi":
+            assert_webrepl_available(target["host"], target["port"])
             return WirelessWebReplTransport(
                 host=target["host"],
                 password=target["password"],
@@ -1045,6 +1249,7 @@ class CalSciApp(QMainWindow):
         }
 
     def _check_device_status(self):
+        self._refresh_pc_server_status()
         if not self.operation_in_progress:
             if self._is_wireless_mode():
                 host = self.wireless_host_input.text().strip()
@@ -1657,24 +1862,12 @@ class CalSciApp(QMainWindow):
                 flasher = self._create_transfer_client(target)
                 auto_retry = self.auto_retry_cb.isChecked()
 
-                required_dirs = {remote_root} if remote_root else set()
-                for local_path in files:
-                    rel_parent = local_path.relative_to(local_root).parent
-                    if rel_parent == Path("."):
-                        continue
-                    cur = remote_root
-                    for part in rel_parent.parts:
-                        cur = f"{cur}/{part}" if cur else part
-                        required_dirs.add(cur)
-
-                if required_dirs:
-                    self._log("Creating folder structure…", "info")
-                    for folder in sorted(required_dirs, key=lambda d: len(d.split("/"))):
-                        if flasher.mkdir(folder):
-                            self._log(f"  + {folder}", "info")
-                        else:
-                            self._log(f"  ! {folder} (failed)", "warning")
-                self._log("Folder structure synced ✓", "success")
+                flasher.sync_folder_structure(
+                    files,
+                    self._log,
+                    root_path=local_root,
+                    remote_prefix=remote_root,
+                )
                 self.bridge.progress_signal.emit(0.10)
 
                 total_size = max(sum(p.stat().st_size for p in files), 1)
@@ -1959,6 +2152,17 @@ class CalSciApp(QMainWindow):
         use_raw=False,
         progress_cb=None,
     ):
+        def _is_unrecoverable_wireless_error(exc):
+            if target["mode"] != "wifi" or not isinstance(exc, WirelessTransferError):
+                return False
+            text = str(exc or "").lower()
+            return (
+                "no route to host" in text
+                or "connection refused" in text
+                or "timed out while connecting" in text
+                or "did not present a password prompt" in text
+            )
+
         for attempt in range(2):
             try:
                 if ensure_dirs:
@@ -1977,7 +2181,7 @@ class CalSciApp(QMainWindow):
                         flasher.put(path, remote_path)
                 return flasher, True
             except Exception as e:
-                if attempt == 0 and auto_retry:
+                if attempt == 0 and auto_retry and not _is_unrecoverable_wireless_error(e):
                     self._log(f"Retry → {path.name} ( )", "warning")
                     if hasattr(flasher, "reconnect"):
                         try:
@@ -2001,7 +2205,8 @@ class CalSciApp(QMainWindow):
                         if use_raw:
                             flasher.enter_raw_repl()
                 else:
-                    self._log(f"Failed: {path.name} — {str(e)[:50]}", "error")
+                    detail = str(e).strip() or e.__class__.__name__
+                    self._log(f"Failed: {path.name} — {detail[:160]}", "error")
                     return flasher, False
         return flasher, False
 
@@ -2013,6 +2218,7 @@ class CalSciApp(QMainWindow):
             event.ignore()
             return
 
+        self._pc_download_server.stop(silent=True)
         event.accept()
 
 

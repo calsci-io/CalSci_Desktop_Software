@@ -1254,10 +1254,17 @@ class MicroPyFlasher:
         result = self._exec_raw_and_read(code, timeout=5.0)
         return "DELETED" in result
 
-    def sync_folder_structure(self, files, log_func, root_path=ROOT):
+    def sync_folder_structure(self, files, log_func, root_path=ROOT, remote_prefix=""):
         """Sync folder structure by creating required folders in order."""
         root_path = Path(root_path)
+        remote_prefix_parts = [
+            part
+            for part in str(remote_prefix or "").replace("\\", "/").split("/")
+            if part and part != "."
+        ]
         required_folders = set()
+        if remote_prefix_parts:
+            required_folders.add("/".join(remote_prefix_parts))
         for path in files:
             local_path = Path(path)
             try:
@@ -1267,7 +1274,7 @@ class MicroPyFlasher:
                 continue
             parts = list(rel.parts)
             for i in range(len(parts) - 1):
-                folder_parts = parts[:i + 1]
+                folder_parts = [*remote_prefix_parts, *parts[:i + 1]]
                 folder_path = "/".join(folder_parts)
                 required_folders.add(folder_path)
 

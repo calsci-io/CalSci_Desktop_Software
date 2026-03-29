@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import struct
+import tempfile
 import time
 import webbrowser
 
@@ -30,6 +31,18 @@ WEBREPL_FRAME_BIN = 0x82
 
 class WirelessTransferError(RuntimeError):
     pass
+
+
+def _remote_join(*parts):
+    tokens = []
+    for part in parts:
+        text = str(part or "").replace("\\", "/").strip()
+        if not text:
+            continue
+        for token in text.split("/"):
+            if token and token != ".":
+                tokens.append(token)
+    return "/" + "/".join(tokens) if tokens else "/"
 
 
 def _friendly_network_error(exc, host=None, port=None):
@@ -62,6 +75,21 @@ def _friendly_network_error(exc, host=None, port=None):
         return WirelessTransferError(detail + ". The device did not answer on the network.")
 
     return WirelessTransferError(str(exc))
+
+
+def _parse_folder_statuses(result: str):
+    statuses = {}
+    for line in str(result or "").splitlines():
+        line = line.strip()
+        if line.startswith("EXISTS:"):
+            statuses[line.replace("EXISTS:", "", 1).strip() or "/"] = ("exists", "")
+        elif line.startswith("CREATED:"):
+            statuses[line.replace("CREATED:", "", 1).strip() or "/"] = ("created", "")
+        elif line.startswith("ERR:"):
+            payload = line.replace("ERR:", "", 1)
+            folder, _, detail = payload.partition(":")
+            statuses[folder.strip() or "/"] = ("error", detail.strip())
+    return statuses
 
 
 class _WebSocket:
@@ -457,20 +485,62 @@ class WirelessWebReplTransport:
 
     def _open_binary_ws(self, timeout: float = 8.0):
         sock, ws = self._open_socket(timeout=timeout)
-        _read_until_prompt(ws, timeout=min(timeout, 3.0))
         ws.ioctl(9, 2)
         return sock, ws
 
     def exec_script(self, script: str, timeout: float = 10.0):
         sock, ws = self._open_socket(timeout=timeout)
+        started_marker = "__CALSCI_EXEC_BEGIN_{}__".format(int(time.time() * 1000))
+        success_marker = "__CALSCI_EXEC_OK_{}__".format(int(time.time() * 1000))
+        failure_marker = "__CALSCI_EXEC_ERR_{}__".format(int(time.time() * 1000))
+        wrapped_script = (
+            "print({})\n"
+            "try:\n"
+            "    exec({})\n"
+            "    print({})\n"
+            "except Exception as __calsci_exc:\n"
+            "    import sys\n"
+            "    sys.print_exception(__calsci_exc)\n"
+            "    print({})\n".format(
+                repr(started_marker),
+                repr(str(script)),
+                repr(success_marker),
+                repr(failure_marker),
+            )
+        )
         try:
-            _read_until_prompt(ws, timeout=min(timeout, 3.0))
-            command = "exec(" + repr(str(script)) + ")\r"
+            try:
+                sock.settimeout(0.35)
+            except Exception:
+                pass
+
+            _read_until_silence(ws, timeout=min(timeout, 1.5), idle_s=0.10)
+            ws.write(b"\r", WEBREPL_FRAME_TXT)
+            _read_until_silence(ws, timeout=min(timeout, 0.8), idle_s=0.08)
+
+            command = "exec(" + repr(wrapped_script) + ")\r"
             ws.write(command.encode("utf-8"), WEBREPL_FRAME_TXT)
-            result = _read_until_prompt(ws, timeout=timeout)
-            if "Traceback" in result:
-                raise WirelessTransferError(result)
-            return result
+            result = _read_until_markers(
+                ws,
+                [success_marker, failure_marker],
+                timeout=timeout,
+                idle_s=0.10,
+            )
+
+            if success_marker not in result and failure_marker not in result:
+                ws.write(b"\r", WEBREPL_FRAME_TXT)
+                result += _read_until_silence(ws, timeout=min(timeout, 1.0), idle_s=0.08)
+
+            cleaned = str(result or "")
+            for marker in (started_marker, success_marker, failure_marker):
+                cleaned = cleaned.replace(marker, "")
+            cleaned = cleaned.strip()
+
+            if failure_marker in result or "Traceback" in cleaned:
+                raise WirelessTransferError(cleaned or "WebREPL command failed")
+            if success_marker not in result:
+                raise WirelessTransferError("WebREPL command did not return a completion marker")
+            return cleaned
         finally:
             try:
                 sock.close()
@@ -478,7 +548,11 @@ class WirelessWebReplTransport:
                 pass
 
     def mkdir(self, path):
-        path_expr = repr(str(path))
+        remote_path = _remote_join(path)
+        if remote_path == "/":
+            return True
+
+        path_expr = repr(remote_path)
         result = self.exec_script(
             "import os\n"
             "try:\n"
@@ -494,18 +568,112 @@ class WirelessWebReplTransport:
         )
         return "EXISTS" in result
 
+    def _run_repl_command(self, command: str, timeout: float = 8.0, completion_markers=None):
+        session = WirelessReplSession(self.host, self.password, self.port)
+        markers = [str(marker) for marker in (completion_markers or []) if marker]
+        try:
+            session.connect(timeout=min(timeout, 8.0))
+            session.send_text("\r")
+            try:
+                session.read_available(timeout=0.25)
+            except Exception:
+                pass
+
+            session.send_text(str(command).rstrip("\r\n") + "\r")
+            end_time = time.monotonic() + max(0.5, float(timeout))
+            chunks = []
+            while time.monotonic() < end_time:
+                chunk = session.read_available(timeout=min(0.35, max(0.05, end_time - time.monotonic())))
+                if chunk:
+                    chunks.append(chunk)
+                    joined = "".join(chunks)
+                    if markers and any(marker in joined for marker in markers):
+                        break
+                elif chunks and not markers:
+                    break
+            return "".join(chunks)
+        finally:
+            session.close()
+
+    def _run_uploaded_script(self, script: str, timeout: float = 10.0):
+        token = str(int(time.time() * 1000))
+        remote_name = "/.calsci_exec_{}.py".format(token[-8:])
+        started_marker = "__CALSCI_EXEC_BEGIN_{}__".format(token)
+        success_marker = "__CALSCI_EXEC_OK_{}__".format(token)
+        failure_marker = "__CALSCI_EXEC_ERR_{}__".format(token)
+        wrapped_script = (
+            "print({})\n"
+            "try:\n"
+            "    exec({})\n"
+            "    print({})\n"
+            "except Exception as __calsci_exc:\n"
+            "    import sys\n"
+            "    sys.print_exception(__calsci_exc)\n"
+            "    print({})\n".format(
+                repr(started_marker),
+                repr(str(script)),
+                repr(success_marker),
+                repr(failure_marker),
+            )
+        )
+
+        local_temp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                suffix=".py",
+                prefix="calsci_exec_",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                handle.write(wrapped_script)
+                local_temp = Path(handle.name)
+
+            self._put_file(local_temp, remote_name)
+            result = self._run_repl_command(
+                "exec(open({}).read())".format(repr(remote_name)),
+                timeout=timeout,
+                completion_markers=[success_marker, failure_marker],
+            )
+
+            cleaned = str(result or "")
+            for marker in (started_marker, success_marker, failure_marker):
+                cleaned = cleaned.replace(marker, "")
+            cleaned = cleaned.strip()
+
+            if failure_marker in result or "Traceback" in cleaned:
+                raise WirelessTransferError(cleaned or "WebREPL command failed")
+            if success_marker not in result:
+                raise WirelessTransferError("WebREPL command did not return a completion marker")
+            return cleaned
+        finally:
+            if local_temp is not None:
+                try:
+                    local_temp.unlink()
+                except Exception:
+                    pass
+            try:
+                self._run_repl_command(
+                    "import os; os.remove({})".format(repr(remote_name)),
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+
     def ensure_dirs(self, remote_path: str):
-        parts = str(remote_path).split("/")[:-1]
-        current = ""
+        parts = _remote_join(remote_path).split("/")[:-1]
+        current = []
         for part in parts:
             if not part:
                 continue
-            current = "{}/{}".format(current, part) if current else part
-            self.mkdir(current)
+            current.append(part)
+            self.mkdir(_remote_join(*current))
 
-    def sync_folder_structure(self, files, log_func, root_path):
+    def sync_folder_structure(self, files, log_func, root_path, remote_prefix=""):
         root_path = Path(root_path)
         required_folders = set()
+        if str(remote_prefix or "").strip():
+            required_folders.add(_remote_join(remote_prefix))
         for path in files:
             local_path = Path(path)
             try:
@@ -515,15 +683,59 @@ class WirelessWebReplTransport:
                 continue
             parts = list(rel.parts)
             for index in range(len(parts) - 1):
-                required_folders.add("/".join(parts[: index + 1]))
+                required_folders.add(_remote_join(remote_prefix, *parts[: index + 1]))
 
-        sorted_folders = sorted(required_folders, key=lambda value: len(value.split("/")))
+        sorted_folders = sorted(
+            required_folders,
+            key=lambda value: (len([part for part in value.split("/") if part]), value),
+        )
         log_func("Creating folder structure…", "info")
+        if not sorted_folders:
+            log_func("Folder structure synced ✓", "success")
+            return
+
+        result = self._run_uploaded_script(
+            "import os\n"
+            "paths = {}\n"
+            "for path in paths:\n"
+            "    if not path or path == '/':\n"
+            "        print('EXISTS:' + (path or '/'))\n"
+            "        continue\n"
+            "    try:\n"
+            "        os.stat(path)\n"
+            "        print('EXISTS:' + path)\n"
+            "        continue\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    try:\n"
+            "        os.mkdir(path)\n"
+            "        print('CREATED:' + path)\n"
+            "    except Exception as exc:\n"
+            "        try:\n"
+            "            os.stat(path)\n"
+            "            print('EXISTS:' + path)\n"
+            "        except Exception:\n"
+            "            print('ERR:' + path + ':' + str(exc))\n".format(repr(sorted_folders)),
+            timeout=max(8.0, min(20.0, 4.0 + (0.25 * len(sorted_folders)))),
+        )
+        statuses = _parse_folder_statuses(result)
+
+        failures = []
         for folder in sorted_folders:
-            if self.mkdir(folder):
+            state, detail = statuses.get(folder, ("error", "no response"))
+            if state in ("exists", "created"):
                 log_func(f"  + {folder}", "info")
             else:
-                log_func(f"  ! {folder} (failed)", "warning")
+                suffix = f": {detail}" if detail else ""
+                log_func(f"  ! {folder} (failed{suffix})", "warning")
+                failures.append((folder, detail or "failed"))
+
+        if failures:
+            joined = ", ".join(folder for folder, _ in failures[:3])
+            if len(failures) > 3:
+                joined += ", ..."
+            raise WirelessTransferError(f"Failed to create {len(failures)} remote folder(s): {joined}")
+
         log_func("Folder structure synced ✓", "success")
 
     def get_file_sizes(self, timeout: float = 25.0):
@@ -788,6 +1000,45 @@ def _read_until_silence(ws, timeout: float = 1.0, idle_s: float = 0.12):
     return b"".join(chunks).decode("utf-8", errors="ignore")
 
 
+def _read_until_markers(ws, markers, timeout: float = 1.0, idle_s: float = 0.12):
+    marker_bytes = []
+    for marker in markers:
+        if marker:
+            marker_bytes.append(str(marker).encode("utf-8"))
+
+    end_time = time.monotonic() + max(0.2, float(timeout))
+    last_data_at = None
+    chunks = []
+    matched = False
+
+    while time.monotonic() < end_time:
+        try:
+            token = ws.read(1, text_ok=True)
+        except (socket.timeout, TimeoutError):
+            if matched and last_data_at is not None and time.monotonic() - last_data_at >= idle_s:
+                break
+            continue
+        except OSError as exc:
+            if chunks:
+                break
+            raise WirelessTransferError("Wireless REPL disconnected") from exc
+
+        if not token:
+            if chunks:
+                break
+            raise WirelessTransferError("Wireless REPL disconnected")
+
+        chunks.append(token)
+        last_data_at = time.monotonic()
+        joined = b"".join(chunks)
+        if marker_bytes and any(marker in joined for marker in marker_bytes):
+            matched = True
+        if matched and (joined.endswith(b">>> ") or joined.endswith(b"... ")):
+            break
+
+    return b"".join(chunks).decode("utf-8", errors="ignore")
+
+
 def check_webrepl_available(host: str, port: int = WIRELESS_DEFAULT_PORT, timeout: float = 0.6):
     try:
         resolved_host, resolved_port = _parse_remote("{}:{}".format(host, port))
@@ -795,6 +1046,42 @@ def check_webrepl_available(host: str, port: int = WIRELESS_DEFAULT_PORT, timeou
             return True
     except Exception:
         return False
+
+
+def assert_webrepl_available(host: str, port: int = WIRELESS_DEFAULT_PORT, timeout: float = 1.2):
+    resolved_host, resolved_port = _parse_remote("{}:{}".format(host, port))
+    sock = socket.socket()
+    sock.settimeout(timeout)
+    try:
+        sock.connect((resolved_host, resolved_port))
+        _client_handshake(sock)
+        ws = _WebSocket(sock)
+        prompt = b""
+        end_time = time.monotonic() + max(0.4, float(timeout))
+        while time.monotonic() < end_time:
+            try:
+                token = ws.read(1, text_ok=True)
+            except (socket.timeout, TimeoutError):
+                continue
+            if not token:
+                break
+            prompt += token
+            if prompt.endswith(b": "):
+                return True
+        raise WirelessTransferError(
+            "Connected to {}:{}, but WebREPL did not present a password prompt.".format(
+                resolved_host, resolved_port
+            )
+        )
+    except WirelessTransferError:
+        raise
+    except Exception as exc:
+        raise _friendly_network_error(exc, host=resolved_host, port=resolved_port) from exc
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 def launch_webrepl_client(host: str, port: int = WIRELESS_DEFAULT_PORT):
