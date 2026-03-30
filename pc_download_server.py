@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,6 +66,26 @@ def list_ipv4_addresses():
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+
+
+def _is_blocked_relative_parts(parts):
+    return any(str(part or "").strip() == ".git" for part in parts)
+
+
+def _iter_export_files(root_path):
+    root_path = Path(root_path)
+    for current_root, dir_names, file_names in os.walk(root_path):
+        dir_names[:] = [name for name in dir_names if name != ".git"]
+        current_root_path = Path(current_root)
+        for file_name in sorted(file_names):
+            file_path = current_root_path / file_name
+            try:
+                relative_parts = file_path.relative_to(root_path).parts
+            except Exception:
+                continue
+            if _is_blocked_relative_parts(relative_parts):
+                continue
+            yield file_path
 
 
 class FolderExportServer:
@@ -194,9 +215,7 @@ class FolderExportServer:
         files = []
         total_bytes = 0
 
-        for file_path in sorted(root_path.rglob("*")):
-            if not file_path.is_file():
-                continue
+        for file_path in _iter_export_files(root_path):
             rel_path = file_path.relative_to(root_path).as_posix()
             size = int(file_path.stat().st_size)
             total_bytes += size
@@ -218,6 +237,8 @@ class FolderExportServer:
         parts = [part for part in rel_path.split("/") if part]
         if any(part in (".", "..") for part in parts):
             raise FileNotFoundError("Invalid file path")
+        if _is_blocked_relative_parts(parts):
+            raise FileNotFoundError("File not found")
 
         candidate = (root_path / Path(*parts)).resolve()
         candidate.relative_to(root_path)
