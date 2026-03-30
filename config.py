@@ -5,15 +5,16 @@ Contains all configuration constants and settings.
 
 from pathlib import Path
 
+APP_DIR = Path(__file__).resolve().parent
+WORKSPACE_ROOT = APP_DIR.parent
+
 # ================= GIT REPOSITORY CONFIG =================
 REPO_URL = "https://github.com/calsci-io/calsci_latest_itr"
 BRANCH = "main"
-ROOT = Path("./calsci_latest_itr")
-SELECTIONS_FILE = Path("./upload_selections.json")
-SYNC_SOURCES_FILE = Path("./sync_sources.json")
-TRIPLE_FIRMWARE_PATHS_FILE = Path("./triple_firmware_paths.json")
-APP_DIR = Path(__file__).resolve().parent
-WORKSPACE_ROOT = APP_DIR.parent
+ROOT = WORKSPACE_ROOT / "calsci_latest_itr"
+SELECTIONS_FILE = APP_DIR / "upload_selections.json"
+SYNC_SOURCES_FILE = APP_DIR / "sync_sources.json"
+TRIPLE_FIRMWARE_PATHS_FILE = APP_DIR / "triple_firmware_paths.json"
 FIRMWARE_BIN = APP_DIR / "firmware.bin"
 
 # ================= TRIPLE BOOT FLASH CONFIG =================

@@ -17,8 +17,10 @@ from pygame import gfxdraw
 
 REPO_URL = "https://github.com/calsci-io/calsci_latest_itr"
 BRANCH = "main"
-ROOT = Path("./calsci_latest_itr")
-SELECTIONS_FILE = Path("./upload_selections.json")
+APP_DIR = Path(__file__).resolve().parent
+WORKSPACE_ROOT = APP_DIR.parent
+ROOT = WORKSPACE_ROOT / "calsci_latest_itr"
+SELECTIONS_FILE = APP_DIR / "upload_selections.json"
 
 ESP32_KEYWORDS = ("Espressif",)
 BAUDRATE = 115200

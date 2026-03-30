@@ -48,6 +48,8 @@ BIN_PKT_PATCH = 2
 BIN_PKT_NAV = 3
 BIN_PKT_LINES = 4
 BIN_PKT_HEARTBEAT = 5
+HELPER_FRAME_PREFIX = "{{CALSCI_HYB:"
+HELPER_FRAME_SUFFIX = "}}"
 
 
 def _crc16_ccitt(data):
@@ -60,6 +62,13 @@ def _crc16_ccitt(data):
             else:
                 crc = (crc << 1) & 0xFFFF
     return crc
+
+
+def _unwrap_helper_frame(text):
+    cleaned = str(text).strip()
+    if cleaned.startswith(HELPER_FRAME_PREFIX) and cleaned.endswith(HELPER_FRAME_SUFFIX):
+        return cleaned[len(HELPER_FRAME_PREFIX) : -len(HELPER_FRAME_SUFFIX)].strip()
+    return cleaned
 
 # Logical key labels by chip keymap modes (for button text only).
 KEY_LAYOUT_DEFAULT = [
@@ -482,7 +491,7 @@ class SerialReaderThread(QThread):
         self.state_received.emit(state)
 
     def _process_text_line(self, line):
-        text = line.strip()
+        text = _unwrap_helper_frame(line)
         if not text:
             return
 
@@ -1429,6 +1438,7 @@ class HybridSimulatorWindow(QMainWindow):
                     buf = buf[nl + 1 :]
                     if not line:
                         continue
+                    line = _unwrap_helper_frame(line)
                     if line.startswith("HYBRID_READY"):
                         result["ready_seen"] = True
                     elif line.startswith("HYBRID_BAUD:"):
@@ -1808,6 +1818,7 @@ class HybridSimulatorWindow(QMainWindow):
         return None
 
     def _on_raw_line(self, line):
+        line = _unwrap_helper_frame(line)
         if line.startswith("ECHO:"):
             self.status_label.setText(f"Echo: {line[5:].strip()}")
             return
