@@ -1,5 +1,5 @@
 {
   "mode": "usb",
-  "host": "192.168.152.136",
+  "host": "10.42.0.200",
   "password": "calsci"
 }
